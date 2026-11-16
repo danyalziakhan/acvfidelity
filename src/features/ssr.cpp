@@ -397,9 +397,9 @@ const param_def SSR_DEFS[SSR_PARAMS] = {
     {"ShortThickness", "Short ray thickness", "Thickness for short rays, near what they reflect. Higher fills\n"
      "more holes there. The game uses 1.43.",
      1.0f / 0.7f, 1, 3.3f, "%.2f", false, false, true},
-    {"FarThickness", "Far thickness", "The least thickness far away. Higher fills more holes in distant\n"
-     "reflections. The game uses 0.018.",
-     0.0175f, 0.002f, 0.1f, "%.3f", false, true, true},
+    {"FarThickness", "Far thickness", "Lower finds reflections on far water instead of ending early.\n"
+     "Fewer steps need more of it. The game uses 0.018.",
+     0.0175f, 0.002f, 0.1f, "%.3f", false, true, false},
     {"Jitter", "Jitter", "Hides banding in reflections. Fewer steps need more of it.\n"
      "The game uses 1.50.",
      1.5f, 0, 4, "%.2f", false, false, false},
@@ -409,9 +409,9 @@ const param_def SSR_DEFS[SSR_PARAMS] = {
     {"StartOffset", "Start offset", "How far from the surface the first sample is. Higher avoids\n"
      "self-reflection specks but misses contact. The game uses 0.0125.",
      0.0125f, 0.001f, 0.1f, "%.4f", false, true, true},
-    {"EdgeTop", "Edge reach, top and bottom", "Where reflections start to fade toward the top and bottom of\n"
-     "the screen. Higher keeps them closer to the edges. The game uses 0.70.",
-     0.70f, 0.3f, 1, "%.2f", false, false, true},
+    {"EdgeTop", "Edge reach", "How close to the top of the screen reflections reach before fading.\n"
+     "Higher shows more of tall things in the water. The game uses 0.70.",
+     0.70f, 0.7f, 1, "%.2f", false, false, false},
     {"EdgeSide", "Edge reach, sides", "Where reflections start to fade toward the sides of the screen.\n"
      "Higher keeps them closer to the edges. The game uses 0.95.",
      0.95f, 0.5f, 1, "%.2f", false, false, true},
@@ -430,17 +430,19 @@ const param_def SSR_DEFS[SSR_PARAMS] = {
 };
 
 // The presets change only what was tested in game. Smoothing rises a little per preset. More steps give
-// sharper thin reflections. Thickness is measured in steps, so it is already tighter with more steps. It
-// falls from the game's 2.0 to 1.0. Below 1.0 a surface crossed between two steps can be missed. Jitter
-// falls as the steps rise.
+// sharper thin reflections. Thickness is measured in steps. It is already tighter with more steps. It falls
+// from the game's 2.0 to 1.0. Below 1.0 a surface crossed between two steps can be missed. Jitter falls as
+// the steps rise. Edge reach rises in equal steps to 0.95, the game's value for the sides. Far thickness
+// falls to 0.005 at 4096 steps. There it finds far reflections instead of the plain fallback. Lower gave
+// noise in reflections of trees.
 const float SSR_PRESET_VALUES[PRESETS][SSR_PARAMS] = {
     {0.70f, 2, 1.6f, 128, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.0175f, 1.5f, 0.1f, 0.0125f, 0.70f, 0.95f, 20,
      3.3333f, 0, 1},
-    {0.72f, 1.6f, 1.6f, 512, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.0175f, 1.25f, 0.1f, 0.0125f, 0.70f, 0.95f, 20,
+    {0.73f, 1.6f, 1.6f, 512, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.013f, 1.25f, 0.1f, 0.0125f, 0.78f, 0.95f, 20,
      3.3333f, 0, 1},
-    {0.75f, 1.3f, 1.6f, 1024, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.0175f, 1.0f, 0.1f, 0.0125f, 0.70f, 0.95f, 20,
+    {0.76f, 1.3f, 1.6f, 1024, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.009f, 1.0f, 0.1f, 0.0125f, 0.87f, 0.95f, 20,
      3.3333f, 0, 1},
-    {0.78f, 1, 1.6f, 4096, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.0175f, 0.5f, 0.1f, 0.0125f, 0.70f, 0.95f, 20,
+    {0.79f, 1, 1.6f, 4096, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.005f, 0.5f, 0.1f, 0.0125f, 0.95f, 0.95f, 20,
      3.3333f, 0, 1},
 };
 

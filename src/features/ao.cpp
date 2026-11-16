@@ -47,6 +47,21 @@ const size_t AT_SLICE_ANGLE = 0xa04; // float pi / 2
 const size_t AT_STEPS = 0xa7c;       // uint 5
 const size_t AT_STEP_SCALE = 0x814;  // float 1 / 5
 const size_t AT_AVERAGE = 0x19cc;    // float 1 / 2
+// The horizon update of each side: max r7.y, r4.w, r7.y and max r7.z, r4.w, r7.z. A sample can only raise
+// the horizon. So every object counts as infinitely thick, and thin grass stems and poles shade like walls.
+// The thickness heuristic of the GTAO paper (Jimenez et al. 2016) lets the horizon sink toward a lower sample
+// by a share. A thin occluder's shade then fades behind it. A solid wall still keeps the horizon up.
+//   mul r9.w, r7.y, l(1 - share)
+//   mad r9.w, r4.w, l(share), r9.w
+//   max r7.y, r4.w, r9.w
+// r9.w is unused in the game's shader. The share applies at every step, so it adds up: (1 - share)^steps of
+// a thin occluder's shade is left. Share 0 is the game's own.
+struct horizon_site
+{
+    size_t at;
+    uint32_t horizon_dest, horizon_src; // r7.y or r7.z
+};
+const horizon_site HORIZONS[2] = {{0xe34, 0x00100022, 0x0010001A}, {0x1110, 0x00100042, 0x0010002A}};
 // mul r0.z, r0.z, CB1[0][2].x (nine tokens) becomes
 // mul r0.z, r0.z, l(power), nop, nop.
 const size_t AT_POWER = 0x19e4;
@@ -301,6 +316,24 @@ bool make_ao_copy(std::vector<uint8_t> &code, const float *v)
     write_u32(code, AT_AVERAGE, bits(1.0f / float(slices)));
     const uint32_t power[9] = {0x7000038, 0x100042, 0, 0x10002a, 0, 0x4001, bits(v[AO_STRENGTH] / 100.0f), NOP, NOP};
     memcpy(code.data() + AT_POWER, power, sizeof(power));
+    const float thin = v[AO_THIN];
+    if (thin > 0.0f)
+    {
+        // Back to front: an insert moves everything after it.
+        for (int k = 1; k >= 0; --k)
+        {
+            const horizon_site &h = HORIZONS[k];
+            const uint32_t game[7] = {0x07000034, h.horizon_dest, 7, 0x0010003A, 4, h.horizon_src, 7};
+            if (memcmp(code.data() + h.at, game, sizeof(game)) != 0)
+                return false;
+            const uint32_t keep[7] = {0x07000038, 0x00100082, 9, h.horizon_src, 7, 0x00004001, bits(1.0f - thin)};
+            const uint32_t rest[16] = {0x09000032, 0x00100082, 9, 0x0010003A, 4, 0x00004001, bits(thin),
+                                       0x0010003A, 9, 0x07000034, h.horizon_dest, 7, 0x0010003A, 4, 0x0010003A, 9};
+            memcpy(code.data() + h.at, keep, sizeof(keep));
+            if (!dxbc_insert(code, h.at + sizeof(keep), rest, 16))
+                return false;
+        }
+    }
     update_checksum(code);
     return true;
 }
@@ -427,8 +460,8 @@ void on_bind_pipeline(command_list *cmd, pipeline_stage stages, pipeline pipe)
 }
 } // namespace
 
-// GPU time grows with directions x steps and with the radius. Measured at 1920x1080 on the test PC: Game 0.14 ms.
-// Fidelity I 0.53 ms. Fidelity II 1.39 ms. Fidelity III 2.49 ms.
+// GPU time grows with directions x steps and with the radius. Measured at 1920x1080 on the test PC with the
+// 0.1.0 presets: Game 0.14 ms. Fidelity I 0.53 ms. Fidelity II 1.39 ms. Fidelity III 2.49 ms.
 const param_def AO_DEFS[AO_PARAMS] = {
     {"Directions", "Directions", "How many directions each pixel checks for shading.\n"
      "More gives steadier shading. The game uses 2.",
@@ -442,6 +475,9 @@ const param_def AO_DEFS[AO_PARAMS] = {
     {"Radius", "Radius", "How far from each spot shading is looked for. The game uses 2 m.\n"
      "Larger shades deep corners. Too large adds dark halos.",
      2, 0.5f, 16, "%.2f m", false, true, false},
+    {"ThinObjects", "Thin objects", "Lets shade fade behind thin things like grass and poles. 0 is the game's.\n"
+     "It adds up over the steps. Small values already go far.",
+     0, 0, 0.01f, "%.4f", false, false, false},
     {"FalloffStart", "Falloff start", "Where occluders start to count less, as a share of the radius.\n"
      "The game uses 0.50. Higher keeps far occluders stronger.",
      0.5f, 0.25f, 2, "%.2f", false, false, true},
@@ -470,10 +506,10 @@ const param_def AO_DEFS[AO_PARAMS] = {
 };
 
 const float AO_PRESET_VALUES[PRESETS][AO_PARAMS] = {
-    {2, 5, 100, 2, 0.5f, 1, 5, 128, 256, 1, 40, 4},
-    {4, 10, 100, 2.25f, 0.5f, 1, 5, 192, 256, 1, 40, 4},
-    {6, 20, 100, 2.5f, 0.5f, 1, 5, 384, 256, 1, 40, 4},
-    {8, 30, 100, 2.75f, 0.5f, 1, 5, 512, 256, 1, 40, 4},
+    {2, 5, 100, 2, 0, 0.5f, 1, 5, 128, 256, 1, 40, 4},
+    {4, 10, 100, 2.5f, 0.0015f, 0.5f, 1, 5, 192, 256, 1, 40, 4},
+    {6, 20, 100, 3.0f, 0.003f, 0.5f, 1, 5, 384, 256, 1, 40, 4},
+    {8, 30, 100, 3.5f, 0.0045f, 0.5f, 1, 5, 512, 256, 1, 40, 4},
 };
 
 void ao_register()

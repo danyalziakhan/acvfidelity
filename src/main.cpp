@@ -2,7 +2,8 @@
 //
 // Takes Assassin's Creed Valhalla's graphics past its own highest settings.
 // Ambient occlusion is in ao.cpp and reflections in ssr.cpp. Level of detail lowers the game's LOD factor
-// (lod.cpp) to keep the detailed models on screen farther away.
+// (lod.cpp) to keep the detailed models on screen farther away. The per-category distances and the pause
+// during loads are in lod_control.cpp.
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -17,6 +18,8 @@
 #include "diagnostics.h"
 #include "log.h"
 #include "lod.h"
+#include "lod_control.h"
+#include "lod_hook.h"
 #include "ssr.h"
 
 #include <algorithm>
@@ -41,20 +44,27 @@ extern "C" __declspec(dllexport) const char *DESCRIPTION =
 namespace
 {
 
-// The window shows the inverse of the factor as the detail distance. It stops at 2.5x (factor 0.4).
-// Nothing more was visible past it. Lower factors brought geometry glitches and crashes in testing.
-const float GAME_FACTOR = 1.0f;
+// The detail distance stops at 2.5x (factor 0.4). Nothing more was visible past it. Lower factors brought
+// geometry glitches and crashes in testing. The categories stop at 2.0x on top of it, as tested in game.
 const float MAX_DISTANCE = 2.5f;
-// Game, Fidelity I, Fidelity II, Fidelity III.
-const float DISTANCE_PRESETS[PRESETS] = {1.0f, 1.5f, 2.0f, 2.5f};
+const float MAX_CATEGORY = 2.0f;
+// Clutter only covers small plants near the player. Their spawn radius stays fixed. So it can go further.
+const float MAX_CLUTTER = 4.0f;
+// Game, Fidelity I, Fidelity II, Fidelity III: detail distance, then objects, clutter and foliage.
+const float LOD_PRESETS[PRESETS][1 + LOD_CATEGORIES] = {
+    {1.0f, 1.0f, 1.0f, 1.0f},
+    {1.5f, 1.25f, 2.0f, 1.25f},
+    {2.0f, 1.5f, 3.0f, 1.5f},
+    {2.5f, 2.0f, 4.0f, 2.0f},
+};
+const char *const LOD_KEYS[1 + LOD_CATEGORIES] = {"DetailDistance", "ObjectsDistance", "ClutterDetail",
+                                                  "FoliageDistance"};
 
-
-float g_factor = GAME_FACTOR; // 1 / the detail distance slider
-float g_distance = 1.0f;     // the slider
+// The window's level of detail values, in the order of LOD_PRESETS.
+float g_lod[1 + LOD_CATEGORIES] = {1.0f, 1.0f, 1.0f, 1.0f};
 float g_ao[AO_PARAMS];
 float g_ssr[SSR_PARAMS];
 
-float g_written = GAME_FACTOR;
 
 // Loads a section's values from acvfidelity.ini. A missing value takes the default preset's.
 void load_values(const char *section, const param_def *defs, const float *presets, int count, int preset,
@@ -73,30 +83,27 @@ void load_values(const char *section, const param_def *defs, const float *preset
 void load_settings()
 {
     config_open();
-    g_distance = std::clamp(config_float("LevelOfDetail", "DetailDistance", DISTANCE_PRESETS[2]), 1.0f, MAX_DISTANCE);
+    for (int i = 0; i <= LOD_CATEGORIES; ++i)
+    {
+        const float v = config_float("LevelOfDetail", LOD_KEYS[i], LOD_PRESETS[2][i]);
+        const float max = i == 0 ? MAX_DISTANCE : i == 1 + LOD_CLUTTER ? MAX_CLUTTER : MAX_CATEGORY;
+        g_lod[i] = std::isfinite(v) ? std::clamp(v, 1.0f, max) : LOD_PRESETS[2][i];
+    }
     load_values("AmbientOcclusion", AO_DEFS, &AO_PRESET_VALUES[0][0], AO_PARAMS, AO_DEFAULT_PRESET, g_ao);
     load_values("ScreenSpaceReflections", SSR_DEFS, &SSR_PRESET_VALUES[0][0], SSR_PARAMS, SSR_DEFAULT_PRESET, g_ssr);
-    g_factor = 1.0f / g_distance;
 }
 
 
-void save_distance()
+// Hands the values to the LOD control, which eases the game toward them.
+void push_lod(const float *values)
 {
-    config_set("LevelOfDetail", "DetailDistance", std::round(g_distance * 100.0f) / 100.0f);
+    lod_control_set(values[0], values + 1);
 }
 
-float effective_factor()
+void save_lod()
 {
-    return g_factor;
-}
-
-void apply_factor()
-{
-    const float factor = effective_factor();
-    if (factor == g_written)
-        return;
-    lod_write(factor);
-    g_written = factor;
+    for (int i = 0; i <= LOD_CATEGORIES; ++i)
+        config_set("LevelOfDetail", LOD_KEYS[i], std::round(g_lod[i] * 100.0f) / 100.0f);
 }
 
 
@@ -106,19 +113,28 @@ void apply_factor()
 void on_present(effect_runtime *runtime)
 {
     diagnostics_present(runtime->get_command_queue());
-    if (!lod_found() && !lod_find())
-        return;
-    apply_factor();
+    lod_control_frame();
 }
 
 const ImVec4 WARNING_COLOR(0.96f, 0.73f, 0.24f, 1.0f);
 
-void set_distance(float distance)
+// One level of detail slider: a distance multiplier shown as "1.50x".
+bool lod_slider(int i, const char *label, float max, const char *tooltip)
 {
-    g_distance = std::clamp(distance, 1.0f, MAX_DISTANCE);
-    g_factor = 1.0f / g_distance;
-    save_distance();
-    apply_factor();
+    float v = g_lod[i];
+    ImGui::SliderFloat(label, &v, 1.0f, max, "%.2fx", ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+    const bool changed = v != g_lod[i];
+    if (changed)
+        g_lod[i] = std::round(v * 20.0f) / 20.0f;
+    if (ImGui::IsItemDeactivatedAfterEdit())
+    {
+        char text[64];
+        snprintf(text, sizeof(text), "%s set to %.2fx", label, g_lod[i]);
+        dd_log(reshade::log::level::info, text);
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", tooltip);
+    return changed;
 }
 
 void lod_section()
@@ -131,18 +147,24 @@ void lod_section()
         ImGui::PopStyleColor();
         return;
     }
-
-
+    ImGui::PushID("lod");
     int current = PRESETS;
     for (int p = 0; p < PRESETS; ++p)
-        if (std::fabs(g_distance - DISTANCE_PRESETS[p]) < 0.005f)
+    {
+        bool same = true;
+        for (int i = 0; i <= LOD_CATEGORIES; ++i)
+            same &= std::fabs(g_lod[i] - LOD_PRESETS[p][i]) < 0.005f;
+        if (same)
             current = p;
+    }
+    bool changed = false;
     if (ImGui::BeginCombo("Preset", PRESET_NAMES[current]))
     {
         for (int p = 0; p < PRESETS; ++p)
             if (ImGui::Selectable(PRESET_NAMES[p], p == current) && p != current)
             {
-                set_distance(DISTANCE_PRESETS[p]);
+                std::copy(LOD_PRESETS[p], LOD_PRESETS[p] + 1 + LOD_CATEGORIES, g_lod);
+                changed = true;
                 char text[64];
                 snprintf(text, sizeof(text), "Level of detail set to %s", PRESET_NAMES[p]);
                 dd_log(reshade::log::level::info, text);
@@ -150,23 +172,29 @@ void lod_section()
         ImGui::EndCombo();
     }
     if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Sets the detail distance below. Each preset reaches farther.");
-
-    float distance = g_distance;
-    ImGui::SliderFloat("Detail distance", &distance, 1.0f, MAX_DISTANCE, "%.2fx",
-                       ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
-    if (distance != g_distance)
-        set_distance(std::round(distance * 20.0f) / 20.0f);
-    if (ImGui::IsItemDeactivatedAfterEdit())
+        ImGui::SetTooltip("Sets every value below. Changing one afterward shows Custom.");
+    changed |= lod_slider(0, "Detail distance", MAX_DISTANCE,
+                          "How far away objects keep their detailed models.\n1.0x is the game's own.");
+    if (lod_control_categories())
     {
-        char text[48];
-        snprintf(text, sizeof(text), "Detail distance set to %.2fx", g_distance);
-        dd_log(reshade::log::level::info, text);
+        changed |= lod_slider(1 + LOD_OBJECTS, "Objects distance", MAX_CATEGORY,
+                              "Rocks, props, bushes and some trees on top of the detail distance.\n"
+                              "1.0x is the game's own.");
+        changed |= lod_slider(1 + LOD_FOLIAGE, "Foliage distance", MAX_CATEGORY,
+                              "Leaves and branches of trees and large plants on top of the\n"
+                              "detail distance. 1.0x is the game's own.");
+        changed |= lod_slider(1 + LOD_CLUTTER, "Clutter detail", MAX_CLUTTER,
+                              "Small plants and clutter near you. It can't add grass farther away.\n"
+                              "1.0x is the game's own.");
     }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("How far away objects keep their detailed models.\n"
-                          "1.0x is the game's own.");
-
+    if (changed)
+    {
+        save_lod();
+        push_lod(g_lod);
+    }
+    if (lod_control_paused())
+        ImGui::TextDisabled("Loading: the game's own detail for a moment.");
+    ImGui::PopID();
 }
 
 void save_value(const char *section, const param_def &def, float value)
@@ -187,7 +215,7 @@ int preset_of(const float *values, const float *presets, int count)
 // the game's own values. Values apply when a slider is let go. Each change makes
 // new shader copies. True when something changed.
 bool tuning_section(const char *title, const char *section, const param_def *defs, const float *presets,
-                    int count, float *values)
+                    int count, float *values, const int *order = nullptr)
 {
     ImGui::SeparatorText(title);
     if (strcmp(section, "ScreenSpaceReflections") == 0)
@@ -227,6 +255,12 @@ bool tuning_section(const char *title, const char *section, const param_def *def
             values[i] = std::round(values[i]);
         if (ImGui::IsItemDeactivatedAfterEdit())
         {
+            // To the decimals shown, so the ini holds what the window showed and presets match again.
+            if (const char *dot = strchr(def.format, '.'); dot != nullptr && !def.integer)
+            {
+                const float scale = std::pow(10.0f, float(dot[1] - '0'));
+                values[i] = std::round(values[i] * scale) / scale;
+            }
             values[i] = std::clamp(values[i], def.min, def.max);
             save_value(section, def, values[i]);
             changed = true;
@@ -237,9 +271,13 @@ bool tuning_section(const char *title, const char *section, const param_def *def
         if (def.tooltip != nullptr && ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", def.tooltip);
     };
-    for (int i = 0; i < count; ++i)
+    // The window's order, if it differs from the order of the definitions.
+    for (int k = 0; k < count; ++k)
+    {
+        const int i = order != nullptr ? order[k] : k;
         if (!defs[i].advanced)
             slider(i);
+    }
     ImGui::PopID();
     return changed;
 }
@@ -254,11 +292,13 @@ void ao_section()
 
 void ssr_section()
 {
-    if (tuning_section("Screen-space reflections", "ScreenSpaceReflections", SSR_DEFS, &SSR_PRESET_VALUES[0][0], SSR_PARAMS, g_ssr))
+    if (tuning_section("Screen-space reflections", "ScreenSpaceReflections", SSR_DEFS, &SSR_PRESET_VALUES[0][0], SSR_PARAMS,
+                       g_ssr, SSR_ORDER))
         ssr_set(g_ssr);
     if (!ssr_ready())
         ImGui::TextColored(WARNING_COLOR, "Not active yet: the game's reflection shader was not seen.");
 }
+
 
 void draw_window(effect_runtime *)
 {
@@ -286,13 +326,14 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
         log_start();
         {
             char text[192];
-            snprintf(text, sizeof(text), "settings: detail distance %.2fx, AO %s, reflections %s", g_distance,
+            snprintf(text, sizeof(text),
+                     "settings: detail distance %.2fx, objects %.2fx, foliage %.2fx, clutter %.2fx, AO %s, reflections %s",
+                     g_lod[0], g_lod[1 + LOD_OBJECTS], g_lod[1 + LOD_FOLIAGE], g_lod[1 + LOD_CLUTTER],
                      PRESET_NAMES[preset_of(g_ao, &AO_PRESET_VALUES[0][0], AO_PARAMS)],
                      PRESET_NAMES[preset_of(g_ssr, &SSR_PRESET_VALUES[0][0], SSR_PARAMS)]);
             dd_log(reshade::log::level::info, text);
         }
-        if (lod_find())
-            apply_factor();
+        push_lod(g_lod);
         reshade::register_event<reshade::addon_event::reshade_present>(on_present);
         ao_set(g_ao);
         ao_register();
@@ -302,8 +343,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
         break;
     case DLL_PROCESS_DETACH:
         // Unloaded while the game keeps running. Give it its own factor back.
-        if (lod_found() && g_written != GAME_FACTOR)
-            lod_write(GAME_FACTOR);
+        lod_control_shutdown();
         // At process exit the threads are already gone. Only a real unload shuts the modules down.
         if (reserved == nullptr)
         {

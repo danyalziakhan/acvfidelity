@@ -20,6 +20,7 @@ enum ao_param
     AO_STEPS,
     AO_STRENGTH,
     AO_RADIUS,
+    AO_THIN,
     AO_FALLOFF_START,
     AO_FALLOFF_RANGE,
     AO_MIN_PIXELS,

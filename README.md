@@ -6,12 +6,14 @@ renderer and changes the game's own shaders. The game's art direction is kept.
 
 ## What it does
 
-- **Level of detail.** Objects such as buildings and rocks keep their detailed models farther away.
+- **Level of detail.** Objects such as buildings and rocks keep their detailed models farther away. Foliage
+  and the clutter near you get their own distances too.
 - **Ambient occlusion.** The game's ambient occlusion with more search directions and steps and a wider
-  radius. Corners, eaves and bushes get fuller shading.
+  radius. Deep corners and the space under roofs get fuller shading. Grass and other thin things no longer
+  shade like solid walls.
 - **Screen-space reflections.** The game's reflections on water and other flat shiny surfaces. More steps
-  along each ray reflect thin things such as reeds and posts sharper. Water flickers less. The game's other
-  reflections are not changed.
+  along each ray reflect thin things such as reeds and posts sharper. Water flickers less. Far water and tall
+  things reflect more fully. The game's other reflections are not changed.
 
 Each one has presets: Game, Fidelity I, Fidelity II and Fidelity III. Game is the game's own look. Fidelity II is the
 default.
@@ -19,13 +21,12 @@ default.
 ## Requirements
 
 - ReShade 6.8 or newer with add-on support.
-- The current version of the game from Steam, Ubisoft Connect or Ubisoft+. The add-on recognizes the game's
-  shaders by their exact contents. A section shows "Not active" if a game update changes them.
+- The current version of the game from Steam, Ubisoft Connect or Ubisoft+.
 
 ## Installing
 
 1. Install ReShade 6.8 or newer with add-on support.
-2. Copy `acvfidelity.addon64` next to `ACValhalla.exe`. That's where ReShade's DLL is.
+2. Copy `acvfidelity.addon64` next to `ACValhalla.exe` in the game folder.
 3. Start the game and open the ReShade overlay to find the **ACV Fidelity** window.
 
 ## Settings
@@ -37,60 +38,90 @@ needed.
 
 **Level of detail**
 
-- **Preset:** Game 1.0x, Fidelity I 1.5x, Fidelity II 2.0x, Fidelity III 2.5x.
-- **Detail distance:** from 1.0x up to 2.5x. 1.0x is the game's own. It costs some frame rate. Testing showed no
-  visible difference beyond 2.5x. Higher values only brought geometry glitches, stretched textures and crashes.
+| Preset | Detail distance | Objects | Foliage | Clutter |
+|---|---|---|---|---|
+| Game | 1.0x | 1.0x | 1.0x | 1.0x |
+| Fidelity I | 1.5x | 1.25x | 1.25x | 2.0x |
+| Fidelity II | 2.0x | 1.5x | 1.5x | 3.0x |
+| Fidelity III | 2.5x | 2.0x | 2.0x | 4.0x |
+
+1.0x is the game's own everywhere.
+
+- **Detail distance** is how far away objects keep their detailed models. It goes up to 2.5x. Beyond 2.5x the
+  visual gain was minimal in testing. Higher values mostly brought geometry glitches, stretched textures and
+  crashes.
+- **Objects distance** adds to it for rocks, props, bushes and some trees. Up to 2.0x.
+- **Foliage distance** adds to it for the leaves and branches of trees and large plants. Up to 2.0x.
+- **Clutter detail** keeps small plants and clutter near you detailed. Up to 4.0x. It can't add grass farther
+  away.
+- During loading screens, fast travel and respawns the game streams in many models at once. Extra detail
+  on top of that can hang the GPU. So the game's own detail is used at those moments. Three seconds after
+  loading ends, detail rises back to the settings over a few seconds. The window shows a line while it waits.
 
 **Ambient occlusion**
 
-| Preset | Directions x steps | Radius | Max radius | GPU time |
+| Preset | Directions x steps | Radius | Thin objects | Max radius |
 |---|---|---|---|---|
-| Game | 2 x 5 | 2 m | 128 px | 0.14 ms |
-| Fidelity I | 4 x 10 | 2.25 m | 192 px | 0.53 ms |
-| Fidelity II | 6 x 20 | 2.5 m | 384 px | 1.39 ms |
-| Fidelity III | 8 x 30 | 2.75 m | 512 px | 2.49 ms |
-
-GPU time was measured at 1920x1080 on an RTX 3070 Ti. At 4K it is about four times higher. Upscaling such as
-DLSS renders at a lower resolution and costs less.
+| Game | 2 x 5 | 2 m | 0 | 128 px |
+| Fidelity I | 4 x 10 | 2.5 m | 0.0015 | 192 px |
+| Fidelity II | 6 x 20 | 3 m | 0.0030 | 384 px |
+| Fidelity III | 8 x 30 | 3.5 m | 0.0045 | 512 px |
 
 - **Directions** and **Steps** decide how many samples each pixel takes. More finds occlusion from more sides
   and catches thin occluders such as grass. GPU time grows in proportion.
 - **Strength** is 100% in every preset. Higher is darker. The game's lighting applies ambient occlusion only to
   ambient light and lifts it in direct sun. So it shows most in shade and indoors.
-- **Radius** is how far around each pixel occluders are searched in meters. The presets raise it only a little.
-  Deep recesses and the space under roofs get darker while open areas stay free of halos. The samples still sit
-  far closer together than the game's. That gives finer contact shading.
+- **Radius** is how far around each pixel occluders are searched in meters. Larger fills deep recesses and
+  the space under roofs. The samples still sit far closer together than the game's. That gives finer contact
+  shading.
+- **Thin objects** lets shade fade behind thin things such as grass and poles. In the game every object
+  shades as if it were solid all the way back. Dense grass then darkens everything behind it and leaves dark
+  halos at a larger radius. The value adds up over the steps. So small values already go far.
 - **Max radius** limits how wide the search gets on screen up close. It's in pixels at half resolution.
 
 **Screen-space reflections**
 
-| Preset | Smoothing | Thickness | Steps | Jitter |
-|---|---|---|---|---|
-| Game | 0.70 | 2.0 | 128 | 1.50 |
-| Fidelity I | 0.72 | 1.6 | 512 | 1.25 |
-| Fidelity II | 0.75 | 1.3 | 1024 | 1.00 |
-| Fidelity III | 0.78 | 1.0 | 4096 | 0.50 |
+| Preset | Smoothing | Steps | Jitter | Thickness | Far thickness | Edge reach |
+|---|---|---|---|---|---|---|
+| Game | 0.70 | 128 | 1.50 | 2.0 | 0.018 | 0.70 |
+| Fidelity I | 0.73 | 512 | 1.25 | 1.6 | 0.013 | 0.78 |
+| Fidelity II | 0.76 | 1024 | 1.00 | 1.3 | 0.009 | 0.87 |
+| Fidelity III | 0.79 | 4096 | 0.50 | 1.0 | 0.005 | 0.95 |
 
 - **Smoothing** pulls the water's surface toward flat before reflecting. Higher reduces flicker on water but
   shows less ripple detail.
-- **Thickness** is how deep behind a surface a ray still counts as a hit. Higher fills holes in reflections
-  when the steps are far apart. With more steps a lower value looks more natural. So the presets lower it as
-  the steps rise.
 - **Steps** are the samples along each ray. More gives crisper reflections of thin things. GPU time grows in
   proportion.
 - **Jitter** shifts where each pixel's steps land. It turns the banding of widely spaced steps into fine noise
   that the game's anti-aliasing smooths. Closer steps leave less banding to hide. So the presets lower it as the
   steps rise.
+- **Thickness** is how deep behind a surface a ray still counts as a hit. Higher fills holes in reflections
+  when the steps are far apart. With more steps a lower value looks more natural. So the presets lower it as
+  the steps rise.
+- **Far thickness** is the same for rays that travel far. Lower finds reflections on far water instead of
+  ending early in the plain fallback. Fewer steps need more of it. So the presets lower it as the steps rise.
+- **Edge reach** is how close to the top of the screen reflections reach before fading. Higher shows more of
+  tall things in the water, such as trees and masts.
 
 Changing a value shows the preset as Custom. The **Game** preset sets a section back to the game's own values.
 
 All settings are saved in `acvfidelity.ini` next to `ACValhalla.exe`. The file is created on the first start.
 
+## Performance
+
+Measured at 1920x1080 on an RTX 3070 Ti. At 4K the cost is about four times higher. Upscaling such as DLSS
+renders at a lower resolution and costs less.
+
+- **Level of detail** costs some frame rate. It depends on how much of the world is in view.
+- **Ambient occlusion** took 0.14 ms at Game, 0.53 ms at Fidelity I, 1.39 ms at Fidelity II and 2.49 ms at
+  Fidelity III. That was with the smaller radius of version 0.1.0. The larger radius can cost a little more.
+- **Screen-space reflections** at Fidelity III took from 0.63 ms to 2.14 ms in testing. Rays that find nothing
+  to reflect run all their steps. So the cost depends on the view. Lower presets cost far less.
+
 ## Good to know
 
 - It works well with [ACV DLSS](https://www.nexusmods.com/assassinscreedvalhalla/mods/428).
-- Dense grass can look darker at the higher ambient occlusion presets. Lower the Strength or pick a lower preset
-  to soften it.
+- If dense grass still looks too dark, raise Thin objects or lower the Strength.
 - ACV Fidelity writes `acvfidelity.log` next to `ACValhalla.exe`. It starts fresh each time the game starts.
   Attach it together with `acvfidelity.ini` when you report a problem.
 - For a detailed log, set `Debug=1` under `[Diagnostics]` in `acvfidelity.ini`.
@@ -145,7 +176,8 @@ and tested before being included.
 
 This is not a mere "vibe-coded" mod. I spent countless hours and days on it.
 I captured and disassembled the game's shaders to find its ambient occlusion,
-reflection and lighting passes and the values that control them. I measured
+reflection and lighting passes and the values that control them. I traced
+where the game splits its level of detail into categories. I measured
 the cost of every setting. And I tested every change in game many times over
 before keeping it.
 

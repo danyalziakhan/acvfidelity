@@ -21,6 +21,8 @@ add_library(acvfidelity SHARED
     src/common/shader_patch.cpp
     src/features/ao.cpp
     src/features/lod.cpp
+    src/features/lod_control.cpp
+    src/features/lod_hook.cpp
     src/features/ssr.cpp
     src/acvfidelity.rc)
 target_include_directories(acvfidelity PRIVATE

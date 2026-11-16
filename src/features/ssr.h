@@ -31,6 +31,11 @@ enum ssr_param
     SSR_PARAMS
 };
 extern const param_def SSR_DEFS[SSR_PARAMS];
+// The order of the sliders in the window.
+const int SSR_ORDER[SSR_PARAMS] = {SSR_SMOOTHING, SSR_STEPS, SSR_JITTER, SSR_THICKNESS, SSR_FAR_THICKNESS, SSR_EDGE_Y,
+                                   SSR_LENGTH, SSR_DISTANCE_SMOOTHING, SSR_FAR_DETAIL, SSR_RAY_CUTOFF,
+                                   SSR_SHORT_THICKNESS, SSR_JITTER_RAMP, SSR_START_OFFSET, SSR_EDGE_X,
+                                   SSR_EDGE_X_SHARPNESS, SSR_EDGE_Y_SHARPNESS, SSR_SKY, SSR_INTENSITY};
 extern const float SSR_PRESET_VALUES[PRESETS][SSR_PARAMS];
 const int SSR_DEFAULT_PRESET = 2; // Fidelity II
 
