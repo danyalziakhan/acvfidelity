@@ -50,18 +50,24 @@ const float MAX_DISTANCE = 2.5f;
 const float MAX_CATEGORY = 2.0f;
 // Clutter only covers small plants near the player. Their spawn radius stays fixed. So it can go further.
 const float MAX_CLUTTER = 4.0f;
-// Game, Fidelity I, Fidelity II, Fidelity III: detail distance, then objects, clutter and foliage.
-const float LOD_PRESETS[PRESETS][1 + LOD_CATEGORIES] = {
-    {1.0f, 1.0f, 1.0f, 1.0f},
-    {1.5f, 1.25f, 2.0f, 1.25f},
-    {2.0f, 1.5f, 3.0f, 1.5f},
-    {2.5f, 2.0f, 4.0f, 2.0f},
+// Grass: above 3x (about 250 m) plants blinked and stretched in testing and the GPU hung. More clutter made it
+// worse. That showed in the raven view zoomed out, where the most grass cells are in view.
+const float MAX_GRASS = 3.0f;
+// The window's level of detail values: detail distance, the categories, then grass.
+const int LOD_GRASS = 1 + LOD_CATEGORIES;
+const int LOD_VALUES = 2 + LOD_CATEGORIES;
+// Game, Fidelity I, Fidelity II, Fidelity III: detail distance, then objects, clutter, foliage and grass.
+const float LOD_PRESETS[PRESETS][LOD_VALUES] = {
+    {1.0f, 1.0f, 1.0f, 1.0f, 1.0f},
+    {1.5f, 1.25f, 2.0f, 1.25f, 1.67f},
+    {2.0f, 1.5f, 3.0f, 1.5f, 2.33f},
+    {2.5f, 2.0f, 4.0f, 2.0f, 3.0f},
 };
-const char *const LOD_KEYS[1 + LOD_CATEGORIES] = {"DetailDistance", "ObjectsDistance", "ClutterDetail",
-                                                  "FoliageDistance"};
+const char *const LOD_KEYS[LOD_VALUES] = {"DetailDistance", "ObjectsDistance", "ClutterDetail", "FoliageDistance",
+                                          "GrassDistance"};
 
 // The window's level of detail values, in the order of LOD_PRESETS.
-float g_lod[1 + LOD_CATEGORIES] = {1.0f, 1.0f, 1.0f, 1.0f};
+float g_lod[LOD_VALUES] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
 float g_ao[AO_PARAMS];
 float g_ssr[SSR_PARAMS];
 
@@ -83,10 +89,13 @@ void load_values(const char *section, const param_def *defs, const float *preset
 void load_settings()
 {
     config_open();
-    for (int i = 0; i <= LOD_CATEGORIES; ++i)
+    for (int i = 0; i < LOD_VALUES; ++i)
     {
         const float v = config_float("LevelOfDetail", LOD_KEYS[i], LOD_PRESETS[2][i]);
-        const float max = i == 0 ? MAX_DISTANCE : i == 1 + LOD_CLUTTER ? MAX_CLUTTER : MAX_CATEGORY;
+        const float max = i == 0                 ? MAX_DISTANCE
+                          : i == 1 + LOD_CLUTTER ? MAX_CLUTTER
+                          : i == LOD_GRASS       ? MAX_GRASS
+                                                 : MAX_CATEGORY;
         g_lod[i] = std::isfinite(v) ? std::clamp(v, 1.0f, max) : LOD_PRESETS[2][i];
     }
     load_values("AmbientOcclusion", AO_DEFS, &AO_PRESET_VALUES[0][0], AO_PARAMS, AO_DEFAULT_PRESET, g_ao);
@@ -97,12 +106,12 @@ void load_settings()
 // Hands the values to the LOD control, which eases the game toward them.
 void push_lod(const float *values)
 {
-    lod_control_set(values[0], values + 1);
+    lod_control_set(values[0], values + 1, values[LOD_GRASS]);
 }
 
 void save_lod()
 {
-    for (int i = 0; i <= LOD_CATEGORIES; ++i)
+    for (int i = 0; i < LOD_VALUES; ++i)
         config_set("LevelOfDetail", LOD_KEYS[i], std::round(g_lod[i] * 100.0f) / 100.0f);
 }
 
@@ -141,18 +150,13 @@ void lod_section()
 {
     ImGui::SeparatorText("Level of detail");
     if (!lod_found())
-    {
-        ImGui::PushStyleColor(ImGuiCol_Text, WARNING_COLOR);
-        ImGui::TextWrapped("Not active: %s.", lod_where().c_str());
-        ImGui::PopStyleColor();
         return;
-    }
     ImGui::PushID("lod");
     int current = PRESETS;
     for (int p = 0; p < PRESETS; ++p)
     {
         bool same = true;
-        for (int i = 0; i <= LOD_CATEGORIES; ++i)
+        for (int i = 0; i < LOD_VALUES; ++i)
             same &= std::fabs(g_lod[i] - LOD_PRESETS[p][i]) < 0.005f;
         if (same)
             current = p;
@@ -163,7 +167,7 @@ void lod_section()
         for (int p = 0; p < PRESETS; ++p)
             if (ImGui::Selectable(PRESET_NAMES[p], p == current) && p != current)
             {
-                std::copy(LOD_PRESETS[p], LOD_PRESETS[p] + 1 + LOD_CATEGORIES, g_lod);
+                std::copy(LOD_PRESETS[p], LOD_PRESETS[p] + LOD_VALUES, g_lod);
                 changed = true;
                 char text[64];
                 snprintf(text, sizeof(text), "Level of detail set to %s", PRESET_NAMES[p]);
@@ -184,16 +188,15 @@ void lod_section()
                               "Leaves and branches of trees and large plants on top of the\n"
                               "detail distance. 1.0x is the game's own.");
         changed |= lod_slider(1 + LOD_CLUTTER, "Clutter detail", MAX_CLUTTER,
-                              "Small plants and clutter near you. It can't add grass farther away.\n"
-                              "1.0x is the game's own.");
+                              "Detail of the small plants and clutter near you.\n1.0x is the game's own.");
+        changed |= lod_slider(LOD_GRASS, "Grass distance", MAX_GRASS,
+                              "How far out grass, flowers and small plants appear.\n1.0x is the game's own.");
     }
     if (changed)
     {
         save_lod();
         push_lod(g_lod);
     }
-    if (lod_control_paused())
-        ImGui::TextDisabled("Loading: the game's own detail for a moment.");
     ImGui::PopID();
 }
 
@@ -219,7 +222,10 @@ bool tuning_section(const char *title, const char *section, const param_def *def
 {
     ImGui::SeparatorText(title);
     if (strcmp(section, "ScreenSpaceReflections") == 0)
+    {
         ImGui::TextDisabled("Water and other flat shiny surfaces.");
+        ImGui::Spacing();
+    }
     ImGui::PushID(title);
     bool changed = false;
     auto save_all = [&] {
@@ -286,8 +292,6 @@ void ao_section()
 {
     if (tuning_section("Ambient occlusion", "AmbientOcclusion", AO_DEFS, &AO_PRESET_VALUES[0][0], AO_PARAMS, g_ao))
         ao_set(g_ao);
-    if (!ao_ready())
-        ImGui::TextColored(WARNING_COLOR, "Not active yet: the game's AO shader was not seen.");
 }
 
 void ssr_section()
@@ -295,22 +299,85 @@ void ssr_section()
     if (tuning_section("Screen-space reflections", "ScreenSpaceReflections", SSR_DEFS, &SSR_PRESET_VALUES[0][0], SSR_PARAMS,
                        g_ssr, SSR_ORDER))
         ssr_set(g_ssr);
-    if (!ssr_ready())
-        ImGui::TextColored(WARNING_COLOR, "Not active yet: the game's reflection shader was not seen.");
 }
 
+
+// The status lines above the settings. At most one line each for level of detail, ambient occlusion and
+// reflections. The area keeps that height so the settings don't move when a line comes or goes.
+const int STATUS_LINES = 3;
+
+void draw_status()
+{
+    const float top = ImGui::GetCursorPosY();
+    bool any = false;
+    const auto line = [&](bool warning, const std::string &text) {
+        if (warning)
+            ImGui::PushStyleColor(ImGuiCol_Text, WARNING_COLOR);
+        ImGui::TextWrapped("%s", text.c_str());
+        if (warning)
+            ImGui::PopStyleColor();
+        any = true;
+    };
+    if (!lod_found())
+        line(true, "Level of detail not active: " + lod_where() + ".");
+    else if (lod_control_paused())
+        line(false, "Loading: the game's own detail for a moment.");
+    else if (lod_control_categories() && !lod_control_grass())
+        line(false, "Grass distance: waiting for the game world.");
+    if (!ao_ready())
+        line(true, "Ambient occlusion not active yet: the game's AO shader was not seen.");
+    if (!ssr_ready())
+        line(true, "Reflections not active yet: the game's reflection shader was not seen.");
+    if (!any)
+        line(false, "Running: level of detail, ambient occlusion and reflections.");
+    ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), top + STATUS_LINES * ImGui::GetTextLineHeightWithSpacing()));
+}
 
 void draw_window(effect_runtime *)
 {
     const float scale = ImGui::GetFontSize() / 13.0f;
     ImGui::SetWindowSize(ImVec2(560.0f * scale, 400.0f * scale), ImGuiCond_FirstUseEver);
 
+    draw_status();
     lod_section();
     ImGui::Spacing();
     ao_section();
     ImGui::Spacing();
     ssr_section();
 
+}
+
+// ReShade's Generic Depth add-on copies the game's depth buffer on ReShade's own command list before effects.
+// It does this every frame, whether or not an effect uses it. During a fast travel or a load the game reuses that
+// memory while the buffer still exists. The copy then faulted the GPU and the game closed, even with no other
+// add-on. With copies before clear operations at full (2) it copies on the game's own command lists instead.
+// The buffer is still valid there. It reads the setting when the device is made, after add-ons load. So it is
+// set here when Generic Depth is on. ACV Fidelity doesn't need it, so turning it off works as well.
+void guard_generic_depth()
+{
+    char disabled[2048] = {};
+    size_t size = sizeof(disabled) - 1;
+    if (reshade::get_config_value(nullptr, "ADDON", "DisabledAddons", disabled, &size))
+    {
+        // A list comes back as names separated by null characters.
+        for (size_t at = 0; at < size && disabled[at] != '\0';)
+        {
+            const std::string name(disabled + at);
+            if (name == "Generic Depth" || name.rfind("Generic Depth@", 0) == 0)
+                return;
+            at += name.size() + 1;
+        }
+    }
+    int mode = 0;
+    if (reshade::get_config_value(nullptr, "DEPTH", "DepthCopyBeforeClears", mode) && mode == 2)
+        return;
+    reshade::set_config_value(nullptr, "DEPTH", "DepthCopyBeforeClears", 2);
+    char text[256];
+    snprintf(text, sizeof(text),
+             "ReShade's Generic Depth add-on is on: set its copy before clear operations to full (was %d). Its "
+             "default crashed the game on fast travel. Turning Generic Depth off works as well",
+             mode);
+    dd_log(reshade::log::level::warning, text);
 }
 } // namespace
 
@@ -327,12 +394,14 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved)
         {
             char text[192];
             snprintf(text, sizeof(text),
-                     "settings: detail distance %.2fx, objects %.2fx, foliage %.2fx, clutter %.2fx, AO %s, reflections %s",
-                     g_lod[0], g_lod[1 + LOD_OBJECTS], g_lod[1 + LOD_FOLIAGE], g_lod[1 + LOD_CLUTTER],
+                     "settings: detail distance %.2fx, objects %.2fx, foliage %.2fx, clutter %.2fx, grass %.2fx, AO %s, "
+                     "reflections %s",
+                     g_lod[0], g_lod[1 + LOD_OBJECTS], g_lod[1 + LOD_FOLIAGE], g_lod[1 + LOD_CLUTTER], g_lod[LOD_GRASS],
                      PRESET_NAMES[preset_of(g_ao, &AO_PRESET_VALUES[0][0], AO_PARAMS)],
                      PRESET_NAMES[preset_of(g_ssr, &SSR_PRESET_VALUES[0][0], SSR_PARAMS)]);
             dd_log(reshade::log::level::info, text);
         }
+        guard_generic_depth();
         push_lod(g_lod);
         reshade::register_event<reshade::addon_event::reshade_present>(on_present);
         ao_set(g_ao);

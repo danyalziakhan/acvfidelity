@@ -7,6 +7,7 @@
 #include <reshade.hpp>
 
 #include "lod.h"
+#include "grass.h"
 #include "lod_hook.h"
 #include "log.h"
 
@@ -27,6 +28,10 @@ const float CAMERA_JUMP = 1000.0f;
 const double HOLD = 3.0;
 // How fast detail rises, in distance multiplier a second. 1.0x to 2.5x takes 3 seconds.
 const float RISE = 0.5f;
+// Grass rises slower: 1.0x to 3.0x takes 8 seconds, so its extra cells stream in gradually. It also waits until
+// the other values have reached their settings. After a load the two streaming loads then come one after the
+// other.
+const float GRASS_RISE = 0.25f;
 
 // Fields of the game's LOD object (see lod_hook.h).
 const unsigned SECOND_DISTANCE = 0x74D4;
@@ -37,9 +42,13 @@ float g_target[LOD_CATEGORIES] = {1.0f, 1.0f, 1.0f};
 float g_distance = 1.0f; // applied now
 float g_applied[LOD_CATEGORIES] = {1.0f, 1.0f, 1.0f};
 float g_written = 1.0f; // the factor in the game's code
+float g_target_grass = 1.0f;
+float g_grass = 1.0f;     // applied now
+bool g_grass_found = true; // last result, for one log line per change
 bool g_started = false;
 bool g_hooked = false;
 bool g_paused = true;
+bool g_frozen = false; // the game paused its own detail outside a load: values held
 double g_hold_until = 0.0;
 double g_last = 0.0;
 // When the applied values started moving toward new targets, or 0 while they match them.
@@ -63,24 +72,29 @@ float approach(float current, float target, float step)
     return std::min(target, current + step);
 }
 
-const char *load_sign(double frame, float second, float speed)
+const char *load_sign(double frame, float speed)
 {
     if (frame > LONG_FRAME)
         return "a long frame";
-    if (g_hooked && second == 0.0f)
-        return "the game pausing its own detail";
     if (g_hooked && speed > CAMERA_JUMP)
         return "a camera jump";
     return nullptr;
 }
 } // namespace
 
-void lod_control_set(float distance, const float categories[LOD_CATEGORIES])
+void lod_control_set(float distance, const float categories[LOD_CATEGORIES], float grass)
 {
     g_target_distance = distance;
+    g_target_grass = grass;
     for (int k = 0; k < LOD_CATEGORIES; ++k)
         g_target[k] = categories[k];
 }
+
+namespace
+{
+void update_values(double now, double frame);
+void write_values();
+} // namespace
 
 void lod_control_frame()
 {
@@ -105,7 +119,12 @@ void lod_control_frame()
         lod_hook_read(SECOND_DISTANCE, second);
         lod_hook_read(CAMERA_SPEED, speed);
     }
-    if (const char *sign = load_sign(frame, second, speed))
+    // The game zeroes its second distance in the map and menus, and during loads. In the map and menus the
+    // values stay where they are. Dropping them there made detail rise again on return. That showed as pop-in.
+    // Inside a load it keeps the game's own values.
+    const bool game_paused = g_hooked && second == 0.0f;
+    const char *load = load_sign(frame, speed);
+    if (const char *sign = load)
     {
         g_hold_until = now + HOLD;
         if (!g_paused)
@@ -116,37 +135,69 @@ void lod_control_frame()
             dd_log(reshade::log::level::info, text);
         }
     }
+    else if (g_paused && game_paused)
+        g_hold_until = now + HOLD;
     else if (g_paused && now >= g_hold_until)
     {
         g_paused = false;
         dd_log(reshade::log::level::info, "LOD: loading over, detail rising back to the settings");
     }
+    if (game_paused != g_frozen)
+    {
+        g_frozen = game_paused;
+        if (!g_paused)
+            dd_log(reshade::log::level::info, g_frozen ? "LOD: the game paused its own detail (map or menu), "
+                                                         "values held as they are"
+                                                       : "LOD: the game's own detail resumed");
+    }
+    // Held as they are while the game pauses its detail outside a load. They are still written below.
+    bool update = !g_frozen || g_paused;
+    if (update)
+        update_values(now, frame);
+    write_values();
+}
 
+namespace
+{
+void update_values(double now, double frame)
+{
+    const bool low = g_paused;
     const float step = RISE * float(std::min(frame, 0.1));
-    g_distance = approach(g_distance, g_paused ? 1.0f : g_target_distance, step);
+    g_distance = approach(g_distance, low ? 1.0f : g_target_distance, step);
     for (int k = 0; k < LOD_CATEGORIES; ++k)
-        g_applied[k] = approach(g_applied[k], g_paused ? 1.0f : g_target[k], step);
+        g_applied[k] = approach(g_applied[k], low ? 1.0f : g_target[k], step);
+
+    bool others = std::fabs(g_distance - g_target_distance) < 0.001f;
+    for (int k = 0; k < LOD_CATEGORIES; ++k)
+        others &= std::fabs(g_applied[k] - g_target[k]) < 0.001f;
+    // Grass drops at once and climbs only after the rest.
+    if (low || g_target_grass <= g_grass)
+        g_grass = low ? 1.0f : g_target_grass;
+    else if (others)
+        g_grass = approach(g_grass, g_target_grass, GRASS_RISE * float(std::min(frame, 0.1)));
 
     // One log line per climb: when the applied values reach the settings, and how long it took.
-    bool reached = std::fabs(g_distance - g_target_distance) < 0.001f;
-    for (int k = 0; k < LOD_CATEGORIES; ++k)
-        reached &= std::fabs(g_applied[k] - g_target[k]) < 0.001f;
-    if (g_paused || reached)
+    const bool reached = others && std::fabs(g_grass - g_target_grass) < 0.001f;
+    if (low || reached)
     {
-        if (!g_paused && g_rise_started != 0.0)
+        if (!low && g_rise_started != 0.0)
         {
             char text[160];
             snprintf(text, sizeof(text),
-                     "LOD: settings reached in %.1f s (detail %.2fx, objects %.2fx, clutter %.2fx, foliage %.2fx)",
+                     "LOD: settings reached in %.1f s (detail %.2fx, objects %.2fx, clutter %.2fx, foliage %.2fx, "
+                     "grass %.2fx)",
                      now - g_rise_started, g_distance, g_applied[LOD_OBJECTS], g_applied[LOD_CLUTTER],
-                     g_applied[LOD_FOLIAGE]);
+                     g_applied[LOD_FOLIAGE], g_grass);
             dd_log(reshade::log::level::info, text);
         }
         g_rise_started = 0.0;
     }
     else if (g_rise_started == 0.0)
         g_rise_started = now;
+}
 
+void write_values()
+{
     const float factor = 1.0f / g_distance;
     if (std::fabs(factor - g_written) > 0.002f || (factor == 1.0f && g_written != 1.0f))
     {
@@ -157,8 +208,18 @@ void lod_control_frame()
     {
         for (int k = 0; k < LOD_CATEGORIES; ++k)
             lod_hook_set(GAME_CATEGORY[k], 1.0f / g_applied[k]);
+        const bool found = grass_apply(lod_hook_object(), g_grass);
+        if (found != g_grass_found)
+        {
+            g_grass_found = found;
+            dd_log(found ? reshade::log::level::info : reshade::log::level::warning,
+                   found ? "Grass distance: streaming grids found"
+                         : "Grass distance: the streaming grids were not found or looked different. The game's own "
+                           "range stays");
+        }
     }
 }
+} // namespace
 
 
 bool lod_control_paused()
@@ -166,9 +227,15 @@ bool lod_control_paused()
     return g_paused;
 }
 
+
 bool lod_control_categories()
 {
     return g_hooked;
+}
+
+bool lod_control_grass()
+{
+    return g_grass_found;
 }
 
 void lod_control_shutdown()

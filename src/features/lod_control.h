@@ -13,13 +13,16 @@ enum lod_category
     LOD_CATEGORIES
 };
 
-// Distances as multipliers of the game's own (1.0). Higher keeps detailed models farther away.
-void lod_control_set(float distance, const float categories[LOD_CATEGORIES]);
+// Distances as multipliers of the game's own (1.0). Higher keeps detailed models farther away. grass scales
+// how far out grass and small plants stream in (see grass.h).
+void lod_control_set(float distance, const float categories[LOD_CATEGORIES], float grass);
 // Once a frame from the present event. Installs the category hook on its first call.
 void lod_control_frame();
 // True while loading or right after it, when the game's own values are in use.
 bool lod_control_paused();
-// False if the categories couldn't be hooked. The overall distance still works then.
+// False if the categories couldn't be hooked. The overall distance still works then. Grass needs the hook too.
 bool lod_control_categories();
+// False while the grass grids can't be found, for example before the game world has loaded.
+bool lod_control_grass();
 // Gives the game its own values back. From DLL_PROCESS_DETACH.
 void lod_control_shutdown();

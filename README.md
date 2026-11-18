@@ -7,7 +7,8 @@ renderer and changes the game's own shaders. The game's art direction is kept.
 ## What it does
 
 - **Level of detail.** Objects such as buildings and rocks keep their detailed models farther away. Foliage
-  and the clutter near you get their own distances too.
+  and the clutter near you get their own distances too. Grass, flowers and small plants appear much farther
+  out instead of ending in flat terrain.
 - **Ambient occlusion.** The game's ambient occlusion with more search directions and steps and a wider
   radius. Deep corners and the space under roofs get fuller shading. Grass and other thin things no longer
   shade like solid walls.
@@ -38,46 +39,40 @@ needed.
 
 **Level of detail**
 
-| Preset | Detail distance | Objects | Foliage | Clutter |
-|---|---|---|---|---|
-| Game | 1.0x | 1.0x | 1.0x | 1.0x |
-| Fidelity I | 1.5x | 1.25x | 1.25x | 2.0x |
-| Fidelity II | 2.0x | 1.5x | 1.5x | 3.0x |
-| Fidelity III | 2.5x | 2.0x | 2.0x | 4.0x |
+| Preset | Detail distance | Objects | Foliage | Clutter | Grass |
+|---|---|---|---|---|---|
+| Game | 1.0x | 1.0x | 1.0x | 1.0x | 1.0x |
+| Fidelity I | 1.5x | 1.25x | 1.25x | 2.0x | 1.67x |
+| Fidelity II | 2.0x | 1.5x | 1.5x | 3.0x | 2.33x |
+| Fidelity III | 2.5x | 2.0x | 2.0x | 4.0x | 3.0x |
 
 1.0x is the game's own everywhere.
 
-- **Detail distance** is how far away objects keep their detailed models. It goes up to 2.5x. Beyond 2.5x the
-  visual gain was minimal in testing. Higher values mostly brought geometry glitches, stretched textures and
-  crashes.
+- **Detail distance** is how far away objects keep their detailed models. Up to 2.5x.
 - **Objects distance** adds to it for rocks, props, bushes and some trees. Up to 2.0x.
 - **Foliage distance** adds to it for the leaves and branches of trees and large plants. Up to 2.0x.
-- **Clutter detail** keeps small plants and clutter near you detailed. Up to 4.0x. It can't add grass farther
-  away.
-- During loading screens, fast travel and respawns the game streams in many models at once. Extra detail
-  on top of that can hang the GPU. So the game's own detail is used at those moments. Three seconds after
-  loading ends, detail rises back to the settings over a few seconds. The window shows a line while it waits.
+- **Clutter detail** keeps small plants and clutter near you detailed. Up to 4.0x.
+- **Grass distance** is how far out grass, flowers and small plants appear. Up to 3.0x, about 250 m.
+- During loading screens, fast travel and respawns the game's own detail is used. Detail rises back to the
+  settings a few seconds after loading ends.
 
 **Ambient occlusion**
 
 | Preset | Directions x steps | Radius | Thin objects | Max radius |
 |---|---|---|---|---|
 | Game | 2 x 5 | 2 m | 0 | 128 px |
-| Fidelity I | 4 x 10 | 2.5 m | 0.0015 | 192 px |
-| Fidelity II | 6 x 20 | 3 m | 0.0030 | 384 px |
-| Fidelity III | 8 x 30 | 3.5 m | 0.0045 | 512 px |
+| Fidelity I | 3 x 10 | 2.5 m | 0.0015 | 213 px |
+| Fidelity II | 4 x 20 | 3 m | 0.0030 | 299 px |
+| Fidelity III | 5 x 30 | 3.5 m | 0.0045 | 384 px |
 
-- **Directions** and **Steps** decide how many samples each pixel takes. More finds occlusion from more sides
-  and catches thin occluders such as grass. GPU time grows in proportion.
-- **Strength** is 100% in every preset. Higher is darker. The game's lighting applies ambient occlusion only to
-  ambient light and lifts it in direct sun. So it shows most in shade and indoors.
-- **Radius** is how far around each pixel occluders are searched in meters. Larger fills deep recesses and
-  the space under roofs. The samples still sit far closer together than the game's. That gives finer contact
-  shading.
-- **Thin objects** lets shade fade behind thin things such as grass and poles. In the game every object
-  shades as if it were solid all the way back. Dense grass then darkens everything behind it and leaves dark
-  halos at a larger radius. The value adds up over the steps. So small values already go far.
-- **Max radius** limits how wide the search gets on screen up close. It's in pixels at half resolution.
+- **Directions** and **Steps** decide how many samples each pixel takes. More finds occlusion from more
+  sides. GPU time grows in proportion.
+- **Strength** is 100% in every preset. Higher is darker. It shows most in shade and indoors.
+- **Radius** is how far around each pixel occlusion is searched, in meters. Larger fills deep recesses and
+  the space under roofs.
+- **Thin objects** lets shade fade behind thin things such as grass and poles. Wider objects such as pots and
+  rocks keep their full shade.
+- **Max radius** limits how wide the search gets on screen up close.
 
 **Screen-space reflections**
 
@@ -88,18 +83,13 @@ needed.
 | Fidelity II | 0.76 | 1024 | 1.00 | 1.3 | 0.009 | 0.87 |
 | Fidelity III | 0.79 | 4096 | 0.50 | 1.0 | 0.005 | 0.95 |
 
-- **Smoothing** pulls the water's surface toward flat before reflecting. Higher reduces flicker on water but
-  shows less ripple detail.
+- **Smoothing** flattens the water before reflecting. Higher reduces flicker but shows less ripple detail.
 - **Steps** are the samples along each ray. More gives crisper reflections of thin things. GPU time grows in
   proportion.
-- **Jitter** shifts where each pixel's steps land. It turns the banding of widely spaced steps into fine noise
-  that the game's anti-aliasing smooths. Closer steps leave less banding to hide. So the presets lower it as the
-  steps rise.
-- **Thickness** is how deep behind a surface a ray still counts as a hit. Higher fills holes in reflections
-  when the steps are far apart. With more steps a lower value looks more natural. So the presets lower it as
-  the steps rise.
-- **Far thickness** is the same for rays that travel far. Lower finds reflections on far water instead of
-  ending early in the plain fallback. Fewer steps need more of it. So the presets lower it as the steps rise.
+- **Jitter** turns banding into fine noise that the game's anti-aliasing smooths. More steps need less of it.
+- **Thickness** is how deep behind a surface a ray still counts as a hit. Higher fills holes in reflections.
+  More steps need less of it.
+- **Far thickness** is the same for rays that travel far. Lower finds reflections on far water.
 - **Edge reach** is how close to the top of the screen reflections reach before fading. Higher shows more of
   tall things in the water, such as trees and masts.
 
@@ -113,10 +103,10 @@ Measured at 1920x1080 on an RTX 3070 Ti. At 4K the cost is about four times high
 renders at a lower resolution and costs less.
 
 - **Level of detail** costs some frame rate. It depends on how much of the world is in view.
-- **Ambient occlusion** took 0.14 ms at Game, 0.53 ms at Fidelity I, 1.39 ms at Fidelity II and 2.49 ms at
-  Fidelity III. That was with the smaller radius of version 0.1.0. The larger radius can cost a little more.
-- **Screen-space reflections** at Fidelity III took from 0.63 ms to 2.14 ms in testing. Rays that find nothing
-  to reflect run all their steps. So the cost depends on the view. Lower presets cost far less.
+- **Ambient occlusion** took 0.14 ms at Game and up to 2.49 ms at Fidelity III, measured with the 0.1.0
+  presets.
+- **Screen-space reflections** at Fidelity III took from 0.63 ms to 2.14 ms in testing, depending on the view.
+  Lower presets cost far less.
 
 ## Good to know
 
@@ -125,6 +115,9 @@ renders at a lower resolution and costs less.
 - ACV Fidelity writes `acvfidelity.log` next to `ACValhalla.exe`. It starts fresh each time the game starts.
   Attach it together with `acvfidelity.ini` when you report a problem.
 - For a detailed log, set `Debug=1` under `[Diagnostics]` in `acvfidelity.ini`.
+- ReShade's **Generic Depth** add-on can crash the game on a fast travel or a loading screen. ACV Fidelity
+  doesn't need it. Turn it off in the **Add-ons** tab unless an effect you use needs ReShade's depth. If it
+  stays on, ACV Fidelity changes one of its settings to stop the crash.
 
 ## Building
 

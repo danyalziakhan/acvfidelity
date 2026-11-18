@@ -23,6 +23,7 @@ add_library(acvfidelity SHARED
     src/features/lod.cpp
     src/features/lod_control.cpp
     src/features/lod_hook.cpp
+    src/features/grass.cpp
     src/features/ssr.cpp
     src/acvfidelity.rc)
 target_include_directories(acvfidelity PRIVATE

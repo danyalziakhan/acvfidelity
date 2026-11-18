@@ -47,8 +47,16 @@ const size_t AT_SLICE_ANGLE = 0xa04; // float pi / 2
 const size_t AT_STEPS = 0xa7c;       // uint 5
 const size_t AT_STEP_SCALE = 0x814;  // float 1 / 5
 const size_t AT_AVERAGE = 0x19cc;    // float 1 / 2
+// mad r0.w, r0.w, l(pi / 16), CB1[0][3].z: each pixel of a 4x4 block turns its directions by its index (0 to
+// 15) times pi / 16, plus a turn per frame. The N directions of a pixel are pi / N apart. With pi / 16, pixels
+// 8 apart get the same directions even at 2. More directions repeat more. Spaced by pi / (16 N), the 16 pixels
+// cover 16 N different directions over the half circle.
+const size_t AT_PATTERN = 0x8ac;     // float pi / 16
+// mov r7.yzw, l(0, -1000, -1000, 0): each direction starts its two horizons here.
+const size_t AT_DIRECTION_START = 0xa40;
+const uint32_t DIRECTION_START[8] = {0x08000036, 0x001000E2, 7, 0x00004002, 0, 0xC47A0000, 0xC47A0000, 0};
 // The horizon update of each side: max r7.y, r4.w, r7.y and max r7.z, r4.w, r7.z. A sample can only raise
-// the horizon. So every object counts as infinitely thick, and thin grass stems and poles shade like walls.
+// the horizon. So every object counts as infinitely thick. Thin grass stems and poles shade like walls.
 // The thickness heuristic of the GTAO paper (Jimenez et al. 2016) lets the horizon sink toward a lower sample
 // by a share. A thin occluder's shade then fades behind it. A solid wall still keeps the horizon up.
 //   mul r9.w, r7.y, l(1 - share)
@@ -56,6 +64,14 @@ const size_t AT_AVERAGE = 0x19cc;    // float 1 / 2
 //   max r7.y, r4.w, r9.w
 // r9.w is unused in the game's shader. The share applies at every step, so it adds up: (1 - share)^steps of
 // a thin occluder's shade is left. Share 0 is the game's own.
+// That alone also let shade fade behind pots, crates and rocks. The sink can't tell how wide an object was.
+// So each side counts how many steps in a row stayed on the object that holds its horizon. The counts are
+// r10.x and r10.z, reset per direction. A sample counts while it is within a tolerance of the horizon. Bumps
+// on a surface then don't end the count. A sample that jumps far above the horizon in one step is a new and
+// nearer object. Its count starts again at 1. A pole right after open ground then counts as narrow. The jump
+// has to be large. A wall seen from its base rises a little at every step and must keep counting. Each side
+// keeps that count for the horizon it holds in r10.y and r10.w. The horizon sinks only when that object was
+// narrow. A grass stem lasts a step or two, a pot many.
 struct horizon_site
 {
     size_t at;
@@ -160,8 +176,8 @@ const pow_site BLUR_NORMAL[2][4] = {
 // The current values, under g_lock.
 float g_values[AO_PARAMS];
 
-// The game may create its AO pipeline more than once (one per root signature
-// or after a device reset). The bind event reads `game` and `active` without
+// The game may create its AO pipeline more than once: one per root signature
+// or after a device reset. The bind event reads `game` and `active` without
 // a lock. Everything else changes under g_lock.
 enum class kind
 {
@@ -177,8 +193,17 @@ struct slot
     device *dev = nullptr;
     pipeline_layout layout = {0};
     std::vector<uint8_t> code;
-    std::vector<uint64_t> made;
+    std::vector<uint64_t> made; // every copy not destroyed yet, the active one included
+    // The values the active copy was made for, so an unrelated change doesn't make it again.
+    float built[AO_PARAMS] = {};
+    bool built_valid = false;
+    // Copies replaced by a newer one, and the frame after which they are destroyed. Command lists the game
+    // recorded with them may still run for a few frames.
+    std::vector<std::pair<uint64_t, uint64_t>> retired;
 };
+// Frames since start, counted at present. Replaced copies wait this many frames before they are destroyed.
+std::atomic<uint64_t> g_frame{0};
+const uint64_t RETIRE_FRAMES = 16;
 const int SLOTS = 16;
 slot g_slots[SLOTS];
 std::mutex g_lock;
@@ -283,7 +308,8 @@ bool make_ao_copy(std::vector<uint8_t> &code, const float *v)
     const float pi = 3.14159265358979f;
     if (read_u32(code, AT_SLICES) != 2 || read_u32(code, AT_SLICE_ANGLE) != bits(pi / 2.0f) ||
         read_u32(code, AT_STEPS) != 5 || read_u32(code, AT_STEP_SCALE) != bits(0.2f) ||
-        read_u32(code, AT_AVERAGE) != bits(0.5f) || memcmp(code.data() + AT_POWER, POWER_GAME, sizeof(POWER_GAME)) != 0)
+        read_u32(code, AT_AVERAGE) != bits(0.5f) || read_u32(code, AT_PATTERN) != bits(pi / 16.0f) ||
+        memcmp(code.data() + AT_POWER, POWER_GAME, sizeof(POWER_GAME)) != 0)
         return false;
     // The game's constants stay unless a value that replaces them changed.
     if (!all_game_values(v, AO_RADIUS, AO_BLUR_WIDTH))
@@ -316,9 +342,16 @@ bool make_ao_copy(std::vector<uint8_t> &code, const float *v)
     write_u32(code, AT_AVERAGE, bits(1.0f / float(slices)));
     const uint32_t power[9] = {0x7000038, 0x100042, 0, 0x10002a, 0, 0x4001, bits(v[AO_STRENGTH] / 100.0f), NOP, NOP};
     memcpy(code.data() + AT_POWER, power, sizeof(power));
+    write_u32(code, AT_PATTERN, bits(pi / (16.0f * float(slices))));
     const float thin = v[AO_THIN];
     if (thin > 0.0f)
     {
+        if (memcmp(code.data() + AT_DIRECTION_START, DIRECTION_START, sizeof(DIRECTION_START)) != 0)
+            return false;
+        // The longest run of steps, in a row, that still counts as thin. A step spans about radius / steps.
+        const float narrow = std::max(1.0f, std::round(float(steps) * v[AO_THIN_WIDTH] / v[AO_RADIUS])) + 0.5f;
+        // How far above the horizon a step has to land to start a new object.
+        const float jump = std::max(0.25f, 2.5f * v[AO_THIN_TOLERANCE]);
         // Back to front: an insert moves everything after it.
         for (int k = 1; k >= 0; --k)
         {
@@ -326,16 +359,57 @@ bool make_ao_copy(std::vector<uint8_t> &code, const float *v)
             const uint32_t game[7] = {0x07000034, h.horizon_dest, 7, 0x0010003A, 4, h.horizon_src, 7};
             if (memcmp(code.data() + h.at, game, sizeof(game)) != 0)
                 return false;
-            const uint32_t keep[7] = {0x07000038, 0x00100082, 9, h.horizon_src, 7, 0x00004001, bits(1.0f - thin)};
-            const uint32_t rest[16] = {0x09000032, 0x00100082, 9, 0x0010003A, 4, 0x00004001, bits(thin),
-                                       0x0010003A, 9, 0x07000034, h.horizon_dest, 7, 0x0010003A, 4, 0x0010003A, 9};
-            memcpy(code.data() + h.at, keep, sizeof(keep));
-            if (!dxbc_insert(code, h.at + sizeof(keep), rest, 16))
+            // This side's run count and held width: r10.x and r10.y, or r10.z and r10.w.
+            const uint32_t run_dst = k == 0 ? 0x00100012 : 0x00100042, run_src = k == 0 ? 0x0010000A : 0x0010002A;
+            const uint32_t wide_dst = k == 0 ? 0x00100022 : 0x00100082, wide_src = k == 0 ? 0x0010001A : 0x0010003A;
+            const uint32_t tokens[] = {
+                // add r9.y, horizon, l(-tolerance)
+                0x07000000, 0x00100022, 9, h.horizon_src, 7, 0x00004001, bits(-v[AO_THIN_TOLERANCE]),
+                // ge r9.w, r4.w, r9.y: this step is still on the object that holds the horizon
+                0x0700001D, 0x00100082, 9, 0x0010003A, 4, 0x0010001A, 9,
+                // add r9.x, run, l(1)
+                0x07000000, 0x00100012, 9, run_src, 10, 0x00004001, bits(1.0f),
+                // and run, r9.x, r9.w: one more in a row, or 0
+                0x07000001, run_dst, 10, 0x0010000A, 9, 0x0010003A, 9,
+                // add r9.x, horizon, l(jump)
+                0x07000000, 0x00100012, 9, h.horizon_src, 7, 0x00004001, bits(jump),
+                // lt r9.x, r9.x, r4.w: far above the horizon in one step, a new object
+                0x07000031, 0x00100012, 9, 0x0010000A, 9, 0x0010003A, 4,
+                // movc run, r9.x, l(1), run
+                0x09000037, run_dst, 10, 0x0010000A, 9, 0x00004001, bits(1.0f), run_src, 10,
+                // movc wide, r9.w, run, wide: the width of whatever holds the horizon
+                0x09000037, wide_dst, 10, 0x0010003A, 9, run_src, 10, wide_src, 10,
+                // mul r9.x, horizon, l(1 - share)
+                0x07000038, 0x00100012, 9, h.horizon_src, 7, 0x00004001, bits(1.0f - thin),
+                // mad r9.x, r4.w, l(share), r9.x: the sunk horizon
+                0x09000032, 0x00100012, 9, 0x0010003A, 4, 0x00004001, bits(thin), 0x0010000A, 9,
+                // lt r9.y, wide, l(narrow)
+                0x07000031, 0x00100022, 9, wide_src, 10, 0x00004001, bits(narrow),
+                // movc r9.x, r9.y, r9.x, horizon: sink only behind a narrow object
+                0x09000037, 0x00100012, 9, 0x0010001A, 9, 0x0010000A, 9, h.horizon_src, 7,
+                // max horizon, r4.w, r9.x
+                0x07000034, h.horizon_dest, 7, 0x0010003A, 4, 0x0010000A, 9,
+            };
+            const size_t count = sizeof(tokens) / sizeof(tokens[0]);
+            memcpy(code.data() + h.at, tokens, 7 * 4);
+            if (!dxbc_insert(code, h.at + 7 * 4, tokens + 7, count - 7))
                 return false;
         }
+        // mov r10.xyzw, l(0, 0, 0, 0) after each direction's horizon start. Before the horizon sites, so last.
+        const uint32_t reset[8] = {0x08000036, 0x001000F2, 10, 0x00004002, 0, 0, 0, 0};
+        if (!dxbc_insert(code, AT_DIRECTION_START + sizeof(DIRECTION_START), reset, 8) ||
+            !dxbc_set_temps(code, 11))
+            return false;
     }
     update_checksum(code);
     return true;
+}
+
+void retire_active(slot &s)
+{
+    const uint64_t old = s.active.exchange(0);
+    if (old != 0)
+        s.retired.push_back({old, g_frame.load() + RETIRE_FRAMES});
 }
 
 // Under g_lock. Makes the copy for the current values. Goes back to the
@@ -344,9 +418,19 @@ void apply_to(slot &s)
 {
     const float *v = g_values;
     const bool blur = s.what != kind::ao;
-    if (blur ? all_game_values(v, AO_BLUR_WIDTH, AO_PARAMS) : all_game_values(v, 0, AO_BLUR_WIDTH))
+    // The values this shader carries: the blur's or the AO pass's.
+    const int from = blur ? AO_BLUR_WIDTH : 0, to = blur ? AO_PARAMS : AO_BLUR_WIDTH;
+    bool same = s.built_valid;
+    for (int i = from; i < to && same; ++i)
+        same = s.built[i] == v[i];
+    if (same)
+        return;
+    for (int i = from; i < to; ++i)
+        s.built[i] = v[i];
+    s.built_valid = true;
+    if (all_game_values(v, from, to))
     {
-        s.active = 0;
+        retire_active(s);
         return;
     }
     std::vector<uint8_t> code = s.code;
@@ -359,13 +443,58 @@ void apply_to(slot &s)
     pipeline_subobject sub = {pipeline_subobject_type::compute_shader, 1, &desc};
     if (!made || !s.dev->create_pipeline(s.layout, 1, &sub, &copy))
     {
-        s.active = 0;
+        retire_active(s);
         dd_log(reshade::log::level::warning, !made ? "AO: a changed shader could not be made. The game's own stays"
                                                    : "AO: D3D12 refused a changed shader. The game's own stays");
         return;
     }
     s.made.push_back(copy.handle);
-    s.active = copy.handle;
+    // In one step, so a bind on another thread gets either the old copy or the new one.
+    const uint64_t old = s.active.exchange(copy.handle);
+    if (old != 0)
+        s.retired.push_back({old, g_frame.load() + RETIRE_FRAMES});
+}
+
+// The device goes away: every copy made on it goes with it.
+void on_destroy_device(device *dev)
+{
+    std::lock_guard lock(g_lock);
+    for (slot &s : g_slots)
+    {
+        if (s.dev != dev)
+            continue;
+        s.game = 0;
+        s.active = 0;
+        for (uint64_t handle : s.made)
+            dev->destroy_pipeline({handle});
+        s.made.clear();
+        s.retired.clear();
+        s.built_valid = false;
+        s.code.clear();
+        s.dev = nullptr;
+    }
+}
+
+// Once a frame: destroys replaced copies once no command list can still use them.
+void on_present(effect_runtime *)
+{
+    const uint64_t frame = ++g_frame;
+    std::lock_guard lock(g_lock);
+    for (slot &s : g_slots)
+    {
+        for (size_t i = 0; i < s.retired.size();)
+        {
+            if (s.retired[i].second > frame || s.dev == nullptr)
+            {
+                ++i;
+                continue;
+            }
+            const uint64_t handle = s.retired[i].first;
+            s.dev->destroy_pipeline({handle});
+            s.made.erase(std::remove(s.made.begin(), s.made.end(), handle), s.made.end());
+            s.retired.erase(s.retired.begin() + i);
+        }
+    }
 }
 
 void apply_all()
@@ -439,6 +568,8 @@ void on_destroy_pipeline(device *dev, pipeline pipe)
         for (uint64_t handle : s.made)
             dev->destroy_pipeline({handle});
         s.made.clear();
+        s.retired.clear();
+        s.built_valid = false;
         s.code.clear();
     }
 }
@@ -475,8 +606,7 @@ const param_def AO_DEFS[AO_PARAMS] = {
     {"Radius", "Radius", "How far from each spot shading is looked for. The game uses 2 m.\n"
      "Larger shades deep corners. Too large adds dark halos.",
      2, 0.5f, 16, "%.2f m", false, true, false},
-    {"ThinObjects", "Thin objects", "Lets shade fade behind thin things like grass and poles. 0 is the game's.\n"
-     "It adds up over the steps. Small values already go far.",
+    {"ThinObjects", "Thin objects", "Lets shade fade behind thin things like grass and poles. 0 is the game's.",
      0, 0, 0.01f, "%.4f", false, false, false},
     {"FalloffStart", "Falloff start", "Where occluders start to count less, as a share of the radius.\n"
      "The game uses 0.50. Higher keeps far occluders stronger.",
@@ -493,6 +623,12 @@ const param_def AO_DEFS[AO_PARAMS] = {
     {"MaxDistance", "Max distance", "No AO beyond this many meters. It fades out over the last eighth.\n"
      "256 is the game's and the most. The game's lighting fades AO out past it.",
      256, 32, 256, "%.0f m", false, true, true},
+    {"ThinWidth", "Thin objects width", "Objects narrower than this many meters count as thin for Thin objects.\n"
+     "Wider ones keep their full shade.",
+     0.25f, 0.05f, 2, "%.2f m", false, true, true},
+    {"ThinTolerance", "Thin objects tolerance", "How far a step may dip below the horizon and still count as the same\n"
+     "object. Higher keeps bumpy surfaces whole.",
+     0.1f, 0, 0.5f, "%.3f", false, false, true},
     {"BlurWidth", "Blur width", "Spacing of the blur's neighbors, in pixels. 1 is the game's. 0 turns\n"
      "the blur off: a checker pattern shows on near surfaces.\n"
      "Wider is smoother but softer.",
@@ -506,10 +642,10 @@ const param_def AO_DEFS[AO_PARAMS] = {
 };
 
 const float AO_PRESET_VALUES[PRESETS][AO_PARAMS] = {
-    {2, 5, 100, 2, 0, 0.5f, 1, 5, 128, 256, 1, 40, 4},
-    {4, 10, 100, 2.5f, 0.0015f, 0.5f, 1, 5, 192, 256, 1, 40, 4},
-    {6, 20, 100, 3.0f, 0.003f, 0.5f, 1, 5, 384, 256, 1, 40, 4},
-    {8, 30, 100, 3.5f, 0.0045f, 0.5f, 1, 5, 512, 256, 1, 40, 4},
+    {2, 5, 100, 2, 0, 0.5f, 1, 5, 128, 256, 0.25f, 0.1f, 1, 40, 4},
+    {3, 10, 100, 2.5f, 0.0015f, 0.5f, 1, 5, 213, 256, 0.25f, 0.1f, 1, 40, 4},
+    {4, 20, 100, 3.0f, 0.003f, 0.5f, 1, 5, 299, 256, 0.25f, 0.1f, 1, 40, 4},
+    {5, 30, 100, 3.5f, 0.0045f, 0.5f, 1, 5, 384, 256, 0.25f, 0.1f, 1, 40, 4},
 };
 
 void ao_register()
@@ -517,10 +653,14 @@ void ao_register()
     reshade::register_event<reshade::addon_event::init_pipeline>(on_init_pipeline);
     reshade::register_event<reshade::addon_event::destroy_pipeline>(on_destroy_pipeline);
     reshade::register_event<reshade::addon_event::bind_pipeline>(on_bind_pipeline);
+    reshade::register_event<reshade::addon_event::reshade_present>(on_present);
+    reshade::register_event<reshade::addon_event::destroy_device>(on_destroy_device);
 }
 
 void ao_unregister()
 {
+    reshade::unregister_event<reshade::addon_event::destroy_device>(on_destroy_device);
+    reshade::unregister_event<reshade::addon_event::reshade_present>(on_present);
     reshade::unregister_event<reshade::addon_event::bind_pipeline>(on_bind_pipeline);
     reshade::unregister_event<reshade::addon_event::destroy_pipeline>(on_destroy_pipeline);
     reshade::unregister_event<reshade::addon_event::init_pipeline>(on_init_pipeline);

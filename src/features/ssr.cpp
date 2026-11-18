@@ -62,7 +62,7 @@ const site COUNT_ITOF = {0xba4, 7, {0x700002b, 0x100082, 0, 0x30802a, 2, 0, 0xc}
 const site COUNT_UTOF = {0xd08, 7, {0x7000056, 0x100022, 0, 0x30802a, 2, 0, 0xc}};
 const site COUNT_LOOP = {0xe0c, 9, {0x9000050, 0x100042, 4, 0x10002a, 3, 0x30802a, 2, 0, 0xc}};
 // mul_sat r3.y, r0.w, CB[15].x: the pixel's world size times this is how
-// much the normal flattens with distance (more is flatter).
+// much the normal flattens with distance. More is flatter.
 const site DISTANCE_SMOOTHING = {0x528, 9, {0x9002038, 0x100022, 3, 0x10003a, 0, 0x30800a, 2, 0, 0xf}};
 // add r0.w, r0.w, CB[16].w: where the top and bottom fade starts (0.70).
 const site EDGE_Y = {0x160c, 9, {0x9000000, 0x100082, 0, 0x10003a, 0, 0x30803a, 2, 0, 0x10}};
