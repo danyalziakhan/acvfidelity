@@ -8,6 +8,10 @@
 // buffer reads. Each becomes a literal. No-ops pad it to keep the code size.
 // In the blurs the neighbor offsets and the depth weight are literals already.
 //
+// Sample spread, min offset, min visibility and thin compensation follow ideas from Intel's XeGTAO
+// (https://github.com/GameTechDev/XeGTAO) and BaBa's XeGTAO for ReShade
+// (https://github.com/BarbatosAWLS/Reshade-Shaders/blob/main/Shaders/BaBa_XeGTAO.fx).
+//
 // Copies are made on the game's root signature when the game creates its
 // pipelines and whenever a setting changes. A copy is bound right after the
 // game binds its own. Nothing has to be restored after it. The game binds the
@@ -30,6 +34,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <mutex>
 #include <vector>
 
@@ -47,6 +52,12 @@ const size_t AT_SLICE_ANGLE = 0xa04; // float pi / 2
 const size_t AT_STEPS = 0xa7c;       // uint 5
 const size_t AT_STEP_SCALE = 0x814;  // float 1 / 5
 const size_t AT_AVERAGE = 0x19cc;    // float 1 / 2
+// mul_sat r0.z, r2.w, l(1 / 2): the average over the directions. AT_AVERAGE is its literal.
+const size_t AT_AVERAGE_OP = 0x19b4;
+// mul r4.w, r0.z, r4.w: how far out each step lands, in pixels.
+const size_t AT_STEP_OFFSET = 0xabc;
+// div r5.x, r5.x, r4.w of each side. r4.w is the sample's distance, next used by the falloff.
+const size_t AT_DISTANCE[2] = {0xda4, 0x1080};
 // mad r0.w, r0.w, l(pi / 16), CB1[0][3].z: each pixel of a 4x4 block turns its directions by its index (0 to
 // 15) times pi / 16, plus a turn per frame. The N directions of a pixel are pi / N apart. With pi / 16, pixels
 // 8 apart get the same directions even at 2. More directions repeat more. Spaced by pi / (16 N), the 16 pixels
@@ -343,17 +354,28 @@ bool make_ao_copy(std::vector<uint8_t> &code, const float *v)
     const uint32_t power[9] = {0x7000038, 0x100042, 0, 0x10002a, 0, 0x4001, bits(v[AO_STRENGTH] / 100.0f), NOP, NOP};
     memcpy(code.data() + AT_POWER, power, sizeof(power));
     write_u32(code, AT_PATTERN, bits(pi / (16.0f * float(slices))));
-    const float thin = v[AO_THIN];
-    if (thin > 0.0f)
+
+    // Everything below inserts code. Back to front: an insert moves everything after it.
+    const float thin = v[AO_THIN], compensation = v[AO_THIN_COMPENSATION];
+    if (thin > 0.0f && memcmp(code.data() + AT_DIRECTION_START, DIRECTION_START, sizeof(DIRECTION_START)) != 0)
+        return false;
+    if (v[AO_MIN_VISIBILITY] > 0.0f)
     {
-        if (memcmp(code.data() + AT_DIRECTION_START, DIRECTION_START, sizeof(DIRECTION_START)) != 0)
+        // max r0.z, r0.z, l(floor) after the average over the directions.
+        const uint32_t game[7] = {0x07002038, 0x00100042, 0, 0x0010003A, 2, 0x00004001, bits(1.0f / float(slices))};
+        if (memcmp(code.data() + AT_AVERAGE_OP, game, sizeof(game)) != 0)
             return false;
-        // The longest run of steps, in a row, that still counts as thin. A step spans about radius / steps.
-        const float narrow = std::max(1.0f, std::round(float(steps) * v[AO_THIN_WIDTH] / v[AO_RADIUS])) + 0.5f;
-        // How far above the horizon a step has to land to start a new object.
-        const float jump = std::max(0.25f, 2.5f * v[AO_THIN_TOLERANCE]);
-        // Back to front: an insert moves everything after it.
-        for (int k = 1; k >= 0; --k)
+        const uint32_t floor[7] = {0x07000034, 0x00100042, 0, 0x0010002A, 0, 0x00004001, bits(v[AO_MIN_VISIBILITY])};
+        if (!dxbc_insert(code, AT_AVERAGE_OP + sizeof(game), floor, 7))
+            return false;
+    }
+    // The longest run of steps, in a row, that still counts as thin. A step spans about radius / steps.
+    const float narrow = std::max(1.0f, std::round(float(steps) * v[AO_THIN_WIDTH] / v[AO_RADIUS])) + 0.5f;
+    // How far above the horizon a step has to land to start a new object.
+    const float jump = std::max(0.25f, 2.5f * v[AO_THIN_TOLERANCE]);
+    for (int k = 1; k >= 0; --k)
+    {
+        if (thin > 0.0f)
         {
             const horizon_site &h = HORIZONS[k];
             const uint32_t game[7] = {0x07000034, h.horizon_dest, 7, 0x0010003A, 4, h.horizon_src, 7};
@@ -395,7 +417,55 @@ bool make_ao_copy(std::vector<uint8_t> &code, const float *v)
             if (!dxbc_insert(code, h.at + 7 * 4, tokens + 7, count - 7))
                 return false;
         }
-        // mov r10.xyzw, l(0, 0, 0, 0) after each direction's horizon start. Before the horizon sites, so last.
+        if (compensation > 0.0f)
+        {
+            // After div r5.x, r5.x, r4.w (the horizon cosine), the distance in r4.w feeds the falloff. It is
+            // measured again with the depth part of r9 stretched by 1 + compensation. Occluders far behind the
+            // pixel then fall off sooner. Thin things in front of open ground stop hazing it.
+            const uint32_t game[7] = {0x0700000E, 0x00100012, 5, 0x0010000A, 5, 0x0010003A, 4};
+            if (memcmp(code.data() + AT_DISTANCE[k], game, sizeof(game)) != 0)
+                return false;
+            const uint32_t tokens[] = {
+                // mul r9.z, r9.z, l(1 + compensation)
+                0x07000038, 0x00100042, 9, 0x0010002A, 9, 0x00004001, bits(1.0f + compensation),
+                // dp3 r4.w, r9.xyzx, r9.xyzx
+                0x07000010, 0x00100082, 4, 0x00100246, 9, 0x00100246, 9,
+                // sqrt r4.w, r4.w
+                0x0500004B, 0x00100082, 4, 0x0010003A, 4,
+            };
+            if (!dxbc_insert(code, AT_DISTANCE[k] + sizeof(game), tokens, uint32_t(std::size(tokens))))
+                return false;
+        }
+    }
+    if (v[AO_SPREAD] != 1.0f || v[AO_MIN_OFFSET] != 0.0f)
+    {
+        // mul r4.w, r0.z, r4.w: step i (plus jitter) times the step length. The steps get spread as
+        // ((i + jitter) / steps)^spread x radius + offset, in pixels. Above 1 they gather near the pixel, where
+        // contact shade is. The offset keeps the first step off the pixel itself.
+        const uint32_t game[7] = {0x07000038, 0x00100082, 4, 0x0010002A, 0, 0x0010003A, 4};
+        if (memcmp(code.data() + AT_STEP_OFFSET, game, sizeof(game)) != 0)
+            return false;
+        const uint32_t tokens[] = {
+            // mul r4.w, r4.w, l(1 / steps)
+            0x07000038, 0x00100082, 4, 0x0010003A, 4, 0x00004001, bits(1.0f / float(steps)),
+            // log r4.w, r4.w
+            0x0500002F, 0x00100082, 4, 0x0010003A, 4,
+            // mul r4.w, r4.w, l(spread)
+            0x07000038, 0x00100082, 4, 0x0010003A, 4, 0x00004001, bits(v[AO_SPREAD]),
+            // exp r4.w, r4.w
+            0x05000019, 0x00100082, 4, 0x0010003A, 4,
+            // mul r9.x, r0.z, l(steps): the radius in pixels
+            0x07000038, 0x00100012, 9, 0x0010002A, 0, 0x00004001, bits(float(steps)),
+            // mad r4.w, r4.w, r9.x, l(offset)
+            0x09000032, 0x00100082, 4, 0x0010003A, 4, 0x0010000A, 9, 0x00004001, bits(v[AO_MIN_OFFSET]),
+        };
+        memcpy(code.data() + AT_STEP_OFFSET, tokens, sizeof(game));
+        if (!dxbc_insert(code, AT_STEP_OFFSET + sizeof(game), tokens + 7, uint32_t(std::size(tokens)) - 7))
+            return false;
+    }
+    if (thin > 0.0f)
+    {
+        // mov r10.xyzw, l(0, 0, 0, 0) after each direction's horizon start.
         const uint32_t reset[8] = {0x08000036, 0x001000F2, 10, 0x00004002, 0, 0, 0, 0};
         if (!dxbc_insert(code, AT_DIRECTION_START + sizeof(DIRECTION_START), reset, 8) ||
             !dxbc_set_temps(code, 11))
@@ -591,61 +661,73 @@ void on_bind_pipeline(command_list *cmd, pipeline_stage stages, pipeline pipe)
 }
 } // namespace
 
-// GPU time grows with directions x steps and with the radius. Measured at 1920x1080 on the test PC with the
-// 0.1.0 presets: Game 0.14 ms. Fidelity I 0.53 ms. Fidelity II 1.39 ms. Fidelity III 2.49 ms.
+// GPU time grows with directions x steps and with the radius. Measured at 1920x1200 on the test PC in a forest:
+// Game 0.13 ms. Fidelity I about 0.33 ms. Fidelity II about 0.75 ms. Fidelity III about 1.3 ms.
 const param_def AO_DEFS[AO_PARAMS] = {
-    {"Directions", "Directions", "How many directions each pixel checks for shading.\n"
-     "More gives steadier shading. The game uses 2.",
+    {"Directions", "Directions", "How many directions each pixel checks for shade. The game uses 2.\n"
+     "More gives steadier shade.",
      2, 2, 12, "%.0f", true, false, false},
-    {"Steps", "Steps", "How finely each direction is checked.\n"
-     "More catches thin things like grass and posts. The game uses 5.",
+    {"Steps", "Steps", "How many steps each direction takes. The game uses 5.\n"
+     "More catches thin things like grass and posts.",
      5, 5, 32, "%.0f", true, false, false},
-    {"Strength", "Strength", "How dark the shading is. 100% is the game's own.\n"
+    {"Strength", "Strength", "How dark the shade gets. The game uses 100%.\n"
      "It shows most in shade and indoors.",
      100, 25, 200, "%.0f%%", true, false, false},
-    {"Radius", "Radius", "How far from each spot shading is looked for. The game uses 2 m.\n"
-     "Larger shades deep corners. Too large adds dark halos.",
+    {"Radius", "Radius", "How far from each spot shade is looked for. The game uses 2 m.\n"
+     "Larger shades deep corners but can add dark halos.",
      2, 0.5f, 16, "%.2f m", false, true, false},
-    {"ThinObjects", "Thin objects", "Lets shade fade behind thin things like grass and poles. 0 is the game's.",
+    {"ThinObjects", "Thin objects", "Lets shade fade behind thin things like grass and poles. The game uses 0.",
      0, 0, 0.01f, "%.4f", false, false, false},
-    {"FalloffStart", "Falloff start", "Where occluders start to count less, as a share of the radius.\n"
-     "The game uses 0.50. Higher keeps far occluders stronger.",
-     0.5f, 0.25f, 2, "%.2f", false, false, true},
-    {"FalloffRange", "Falloff range", "Over what share of the radius they fade out after that. The game uses\n"
-     "1.00. Higher gives softer, wider shading.",
+    {"FalloffStart", "Falloff start", "The share of the radius where occluders begin to count less.\n"
+     "The game uses 0.50. Higher keeps more shade from nearby objects.",
+     0.5f, 0.25f, 2, "%.2f", false, false, false},
+    {"FalloffRange", "Falloff range", "Over what share of the radius they fade out after that.\n"
+     "The game uses 1.00. Higher gives softer and wider shade.",
      1, 0.1f, 4, "%.2f", false, true, true},
-    {"MinRadius", "Min radius", "The radius on screen is at least this many pixels (half resolution).\n"
-     "The game uses 5. It keeps distant AO from vanishing.",
+    {"MinRadius", "Min radius", "The smallest radius on screen in pixels at half resolution.\n"
+     "The game uses 5. It keeps distant shade from vanishing.",
      5, 1, 64, "%.0f px", false, false, true},
-    {"MaxRadius", "Max radius", "Keeps shading right in front of the camera from getting too wide.\n"
+    {"MaxRadius", "Max radius", "Keeps shade right in front of the camera from getting too wide.\n"
      "The game uses 128.",
      128, 128, 512, "%.0f px", false, true, false},
-    {"MaxDistance", "Max distance", "No AO beyond this many meters. It fades out over the last eighth.\n"
-     "256 is the game's and the most. The game's lighting fades AO out past it.",
+    {"MaxDistance", "Max distance", "No shade beyond this many meters. It fades out over the last eighth.\n"
+     "The game uses 256, the most. Its lighting fades AO out past that.",
      256, 32, 256, "%.0f m", false, true, true},
-    {"ThinWidth", "Thin objects width", "Objects narrower than this many meters count as thin for Thin objects.\n"
+    {"ThinWidth", "Thin objects width", "Objects narrower than this count as thin for Thin objects.\n"
      "Wider ones keep their full shade.",
      0.25f, 0.05f, 2, "%.2f m", false, true, true},
-    {"ThinTolerance", "Thin objects tolerance", "How far a step may dip below the horizon and still count as the same\n"
-     "object. Higher keeps bumpy surfaces whole.",
+    {"ThinTolerance", "Thin objects tolerance", "How far a step may dip below the horizon and still count as the same object.\n"
+     "Higher keeps bumpy surfaces whole.",
      0.1f, 0, 0.5f, "%.3f", false, false, true},
-    {"BlurWidth", "Blur width", "Spacing of the blur's neighbors, in pixels. 1 is the game's. 0 turns\n"
-     "the blur off: a checker pattern shows on near surfaces.\n"
+    {"SampleSpread", "Sample spread", "How the steps spread out from each pixel. The game uses 1, even spacing.\n"
+     "Higher places more of them close by where contact shade forms.",
+     1, 1, 3, "%.1f", false, false, false},
+    {"MinOffset", "Min offset", "The first step lands at least this many pixels away at half resolution.\n"
+     "The game uses 0. It keeps surfaces from shading themselves.",
+     0, 0, 4, "%.1f px", false, false, false},
+    {"MinVisibility", "Min visibility", "Limits how dark shade can get. The game uses 0.\n"
+     "It prevents pitch black spots in tight gaps.",
+     0, 0, 0.2f, "%.2f", false, false, false},
+    {"ThinCompensation", "Thin compensation", "Occluders far behind a surface count less. The game uses 0.\n"
+     "It greatly reduces the haze grass and leaves put on open ground and snow.",
+     0, 0, 8, "%.1f", false, false, false},
+    {"BlurWidth", "Blur width", "Spacing of the blur's neighbors in pixels. The game uses 1.\n"
+     "0 turns the blur off and shows a checker pattern up close.\n"
      "Wider is smoother but softer.",
      1, 0, 4, "%.0f", true, false, true},
-    {"BlurDepth", "Blur edge", "How sharply depth differences stop the blur at edges. 40 is the game's.\n"
-     "Lower blurs across edges and gives halos. Higher keeps edges crisp.",
+    {"BlurDepth", "Blur edge", "How sharply depth differences stop the blur at edges. The game uses 40.\n"
+     "Lower blurs across edges and adds halos. Higher keeps edges crisp.",
      40, 1, 400, "%.0f", false, true, true},
-    {"BlurNormal", "Blur normal edge", "How sharply differences in surface direction stop the blur. 4 is the\n"
-     "game's. Higher keeps creases and corners crisp. Lower blurs across them.",
+    {"BlurNormal", "Blur normal edge", "How sharply changes in surface direction stop the blur. The game uses 4.\n"
+     "Higher keeps creases and corners crisp. Lower blurs across them.",
      4, 0.5f, 32, "%.1f", false, true, true},
 };
 
 const float AO_PRESET_VALUES[PRESETS][AO_PARAMS] = {
-    {2, 5, 100, 2, 0, 0.5f, 1, 5, 128, 256, 0.25f, 0.1f, 1, 40, 4},
-    {3, 10, 100, 2.5f, 0.0015f, 0.5f, 1, 5, 213, 256, 0.25f, 0.1f, 1, 40, 4},
-    {4, 20, 100, 3.0f, 0.003f, 0.5f, 1, 5, 299, 256, 0.25f, 0.1f, 1, 40, 4},
-    {5, 30, 100, 3.5f, 0.0045f, 0.5f, 1, 5, 384, 256, 0.25f, 0.1f, 1, 40, 4},
+    {2, 5, 100, 2, 0, 0.5f, 1, 5, 128, 256, 0.25f, 0.1f, 1, 0, 0, 0, 1, 40, 4},
+    {3, 10, 100, 2, 0.0015f, 0.67f, 1, 5, 213, 256, 0.25f, 0.1f, 2, 1.3f, 0.03f, 2, 1, 40, 4},
+    {4, 20, 100, 2, 0.003f, 0.83f, 1, 5, 299, 256, 0.25f, 0.1f, 2, 1.3f, 0.03f, 2, 1, 40, 4},
+    {5, 30, 100, 2, 0.0045f, 1.0f, 1, 5, 384, 256, 0.25f, 0.1f, 2, 1.3f, 0.03f, 2, 1, 40, 4},
 };
 
 void ao_register()

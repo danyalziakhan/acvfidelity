@@ -28,6 +28,10 @@ enum ao_param
     AO_MAX_DISTANCE,
     AO_THIN_WIDTH,
     AO_THIN_TOLERANCE,
+    AO_SPREAD,
+    AO_MIN_OFFSET,
+    AO_MIN_VISIBILITY,
+    AO_THIN_COMPENSATION,
     AO_BLUR_WIDTH,
     AO_BLUR_DEPTH,
     AO_BLUR_NORMAL,
@@ -35,6 +39,12 @@ enum ao_param
 };
 extern const param_def AO_DEFS[AO_PARAMS];
 extern const float AO_PRESET_VALUES[PRESETS][AO_PARAMS];
+// The window's order: the settings of taste first.
+const int AO_ORDER[AO_PARAMS] = {AO_STRENGTH,     AO_RADIUS,         AO_DIRECTIONS,        AO_STEPS,
+                                 AO_FALLOFF_START, AO_MAX_PIXELS,     AO_THIN,              AO_THIN_COMPENSATION,
+                                 AO_SPREAD,       AO_MIN_OFFSET,     AO_MIN_VISIBILITY,    AO_FALLOFF_RANGE,
+                                 AO_MIN_PIXELS,   AO_MAX_DISTANCE,   AO_THIN_WIDTH,        AO_THIN_TOLERANCE,
+                                 AO_BLUR_WIDTH,   AO_BLUR_DEPTH,     AO_BLUR_NORMAL};
 const int AO_DEFAULT_PRESET = 2; // Fidelity II
 
 void ao_register();

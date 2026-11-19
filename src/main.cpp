@@ -86,6 +86,39 @@ void load_values(const char *section, const param_def *defs, const float *preset
     }
 }
 
+void save_value(const char *section, const param_def &def, float value);
+
+// An ini from 0.3.0 has no sample spread yet. If its AO matches a 0.3.0 preset, it gets the same preset of
+// this version. Strength stays as it was.
+void upgrade_ao()
+{
+    if (std::isfinite(config_float("AmbientOcclusion", "SampleSpread", NAN)))
+        return;
+    // Directions, steps, radius, thin objects, max radius.
+    static const float OLD[PRESETS][5] = {
+        {2, 5, 2, 0, 128}, {3, 10, 2.5f, 0.0015f, 213}, {4, 20, 3, 0.003f, 299}, {5, 30, 3.5f, 0.0045f, 384}};
+    const int KEYS[5] = {AO_DIRECTIONS, AO_STEPS, AO_RADIUS, AO_THIN, AO_MAX_PIXELS};
+    for (int p = 0; p < PRESETS; ++p)
+    {
+        bool match = true;
+        for (int k = 0; k < 5; ++k)
+            match &= g_ao[KEYS[k]] == OLD[p][k];
+        if (!match)
+            continue;
+        const float strength = g_ao[AO_STRENGTH];
+        std::copy(AO_PRESET_VALUES[p], AO_PRESET_VALUES[p] + AO_PARAMS, g_ao);
+        g_ao[AO_STRENGTH] = strength;
+        for (int i = 0; i < AO_PARAMS; ++i)
+            if (!AO_DEFS[i].advanced)
+                save_value("AmbientOcclusion", AO_DEFS[i], g_ao[i]);
+        char text[96];
+        snprintf(text, sizeof(text), "Ambient occlusion: settings from 0.3.0 moved to this version's %s",
+                 PRESET_NAMES[p]);
+        dd_log(reshade::log::level::info, text);
+        return;
+    }
+}
+
 void load_settings()
 {
     config_open();
@@ -99,6 +132,7 @@ void load_settings()
         g_lod[i] = std::isfinite(v) ? std::clamp(v, 1.0f, max) : LOD_PRESETS[2][i];
     }
     load_values("AmbientOcclusion", AO_DEFS, &AO_PRESET_VALUES[0][0], AO_PARAMS, AO_DEFAULT_PRESET, g_ao);
+    upgrade_ao();
     load_values("ScreenSpaceReflections", SSR_DEFS, &SSR_PRESET_VALUES[0][0], SSR_PARAMS, SSR_DEFAULT_PRESET, g_ssr);
 }
 
@@ -290,7 +324,8 @@ bool tuning_section(const char *title, const char *section, const param_def *def
 
 void ao_section()
 {
-    if (tuning_section("Ambient occlusion", "AmbientOcclusion", AO_DEFS, &AO_PRESET_VALUES[0][0], AO_PARAMS, g_ao))
+    if (tuning_section("Ambient occlusion", "AmbientOcclusion", AO_DEFS, &AO_PRESET_VALUES[0][0], AO_PARAMS, g_ao,
+                       AO_ORDER))
         ao_set(g_ao);
 }
 
@@ -337,6 +372,8 @@ void draw_window(effect_runtime *)
 {
     const float scale = ImGui::GetFontSize() / 13.0f;
     ImGui::SetWindowSize(ImVec2(560.0f * scale, 400.0f * scale), ImGuiCond_FirstUseEver);
+    // The height follows the settings, so every one shows without scrolling. ImGui keeps it on the screen.
+    ImGui::SetWindowSize(ImVec2(ImGui::GetWindowWidth(), 0.0f));
 
     draw_status();
     lod_section();

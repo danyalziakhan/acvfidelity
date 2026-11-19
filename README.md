@@ -9,9 +9,9 @@ renderer and changes the game's own shaders. The game's art direction is kept.
 - **Level of detail.** Objects such as buildings and rocks keep their detailed models farther away. Foliage
   and the clutter near you get their own distances too. Grass, flowers and small plants appear much farther
   out instead of ending in flat terrain.
-- **Ambient occlusion.** The game's ambient occlusion with more search directions and steps and a wider
-  radius. Deep corners and the space under roofs get fuller shading. Grass and other thin things no longer
-  shade like solid walls.
+- **Ambient occlusion.** The game's ambient occlusion with more directions and steps. Contact shade under
+  objects and in corners is fuller and steadier. Thin things such as grass and poles cast much less false shade.
+  The haze they leave over open ground and snow is greatly reduced.
 - **Screen-space reflections.** The game's reflections on water and other flat shiny surfaces. More steps
   along each ray reflect thin things such as reeds and posts sharper. Water flickers less. Far water and tall
   things reflect more fully. The game's other reflections are not changed.
@@ -46,33 +46,40 @@ needed.
 | Fidelity II | 2.0x | 1.5x | 1.5x | 3.0x | 2.33x |
 | Fidelity III | 2.5x | 2.0x | 2.0x | 4.0x | 3.0x |
 
-1.0x is the game's own everywhere.
-
 - **Detail distance** is how far away objects keep their detailed models. Up to 2.5x.
 - **Objects distance** adds to it for rocks, props, bushes and some trees. Up to 2.0x.
 - **Foliage distance** adds to it for the leaves and branches of trees and large plants. Up to 2.0x.
 - **Clutter detail** keeps small plants and clutter near you detailed. Up to 4.0x.
-- **Grass distance** is how far out grass, flowers and small plants appear. Up to 3.0x, about 250 m.
+- **Grass distance** is how far out grass and small plants appear. Up to 3.0x or about 250 m.
 - During loading screens, fast travel and respawns the game's own detail is used. Detail rises back to the
   settings a few seconds after loading ends.
 
 **Ambient occlusion**
 
-| Preset | Directions x steps | Radius | Thin objects | Max radius |
+| Preset | Directions x steps | Falloff start | Max radius | Thin objects |
 |---|---|---|---|---|
-| Game | 2 x 5 | 2 m | 0 | 128 px |
-| Fidelity I | 3 x 10 | 2.5 m | 0.0015 | 213 px |
-| Fidelity II | 4 x 20 | 3 m | 0.0030 | 299 px |
-| Fidelity III | 5 x 30 | 3.5 m | 0.0045 | 384 px |
+| Game | 2 x 5 | 0.50 | 128 px | 0 |
+| Fidelity I | 3 x 10 | 0.67 | 213 px | 0.0015 |
+| Fidelity II | 4 x 20 | 0.83 | 299 px | 0.0030 |
+| Fidelity III | 5 x 30 | 1.00 | 384 px | 0.0045 |
 
-- **Directions** and **Steps** decide how many samples each pixel takes. More finds occlusion from more
-  sides. GPU time grows in proportion.
-- **Strength** is 100% in every preset. Higher is darker. It shows most in shade and indoors.
-- **Radius** is how far around each pixel occlusion is searched, in meters. Larger fills deep recesses and
-  the space under roofs.
+Every Fidelity preset also uses Thin compensation 2, Sample spread 2, Min offset 1.3 px and Min visibility 0.03.
+
+- **Strength** sets how dark the shade gets. It shows most in shade and indoors.
+- **Radius** is how far from each pixel occlusion is looked for. Larger fills deep recesses but can add dark
+  halos.
+- **Directions** and **Steps** set how many samples each pixel takes. More gives fuller and steadier shade.
+  GPU time grows in proportion.
+- **Falloff start** is the share of the radius where occluders begin to count less. Higher keeps more shade
+  from nearby walls and objects.
+- **Max radius** limits how wide the search gets on screen up close.
 - **Thin objects** lets shade fade behind thin things such as grass and poles. Wider objects such as pots and
   rocks keep their full shade.
-- **Max radius** limits how wide the search gets on screen up close.
+- **Thin compensation** makes occluders far behind a surface count less. It greatly reduces the haze grass and
+  leaves put on open ground and snow.
+- **Sample spread** places more steps close to each pixel where contact shade forms.
+- **Min offset** keeps the first step off the pixel itself so surfaces don't shade themselves.
+- **Min visibility** limits how dark shade can get. It prevents pitch black spots in tight gaps.
 
 **Screen-space reflections**
 
@@ -93,8 +100,6 @@ needed.
 - **Edge reach** is how close to the top of the screen reflections reach before fading. Higher shows more of
   tall things in the water, such as trees and masts.
 
-Changing a value shows the preset as Custom. The **Game** preset sets a section back to the game's own values.
-
 All settings are saved in `acvfidelity.ini` next to `ACValhalla.exe`. The file is created on the first start.
 
 ## Performance
@@ -103,9 +108,9 @@ Measured at 1920x1080 on an RTX 3070 Ti. At 4K the cost is about four times high
 renders at a lower resolution and costs less.
 
 - **Level of detail** costs some frame rate. It depends on how much of the world is in view.
-- **Ambient occlusion** took 0.14 ms at Game and up to 2.49 ms at Fidelity III, measured with the 0.1.0
-  presets.
-- **Screen-space reflections** at Fidelity III took from 0.63 ms to 2.14 ms in testing, depending on the view.
+- **Ambient occlusion** took 0.13 ms at Game and about 1.3 ms at Fidelity III. Fidelity I and II
+  took about 0.33 ms and 0.75 ms.
+- **Screen-space reflections** at Fidelity III took 0.63 ms to 2.14 ms depending on the view.
   Lower presets cost far less.
 
 ## Good to know
@@ -154,6 +159,10 @@ repository's copy.
 The location and values of the game's LOD factor come from the
 [Valhalla LOD Fix](https://www.nexusmods.com/assassinscreedvalhalla/mods/368). I set the 2.5x maximum from my
 own stability testing at different values.
+
+Sample spread, Min offset, Min visibility and Thin compensation follow ideas from Intel's
+[XeGTAO](https://github.com/GameTechDev/XeGTAO) and BaBa's
+[XeGTAO for ReShade](https://github.com/BarbatosAWLS/Reshade-Shaders/blob/main/Shaders/BaBa_XeGTAO.fx).
 
 ## Third-party licenses
 
