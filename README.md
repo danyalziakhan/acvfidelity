@@ -116,13 +116,12 @@ renders at a lower resolution and costs less.
 ## Good to know
 
 - It works well with [ACV DLSS](https://www.nexusmods.com/assassinscreedvalhalla/mods/428).
-- If dense grass still looks too dark, raise Thin objects or lower the Strength.
 - ACV Fidelity writes `acvfidelity.log` next to `ACValhalla.exe`. It starts fresh each time the game starts.
   Attach it together with `acvfidelity.ini` when you report a problem.
 - For a detailed log, set `Debug=1` under `[Diagnostics]` in `acvfidelity.ini`.
 - ReShade's **Generic Depth** add-on can crash the game on a fast travel or a loading screen. ACV Fidelity
   doesn't need it. Turn it off in the **Add-ons** tab unless an effect you use needs ReShade's depth. If it
-  stays on, ACV Fidelity changes one of its settings to stop the crash.
+  stays on, ACV Fidelity sets `DepthCopyBeforeClears=2` under `[DEPTH]` in `ReShade.ini` to stop the crash.
 
 ## Building
 
@@ -160,8 +159,8 @@ The location and values of the game's LOD factor come from the
 [Valhalla LOD Fix](https://www.nexusmods.com/assassinscreedvalhalla/mods/368). I set the 2.5x maximum from my
 own stability testing at different values.
 
-Sample spread, Min offset, Min visibility and Thin compensation follow ideas from Intel's
-[XeGTAO](https://github.com/GameTechDev/XeGTAO) and BaBa's
+Ambient occlusion's Sample spread, Min offset, Min visibility and Thin compensation follow ideas from
+Intel's [XeGTAO](https://github.com/GameTechDev/XeGTAO) and BaBa's
 [XeGTAO for ReShade](https://github.com/BarbatosAWLS/Reshade-Shaders/blob/main/Shaders/BaBa_XeGTAO.fx).
 
 ## Third-party licenses
