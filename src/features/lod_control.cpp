@@ -26,12 +26,12 @@ const double LONG_FRAME = 0.2;
 const float CAMERA_JUMP = 1000.0f;
 // The game's values stay this long after the last sign of a load.
 const double HOLD = 3.0;
-// How fast detail rises, in distance multiplier a second. 1.0x to 2.5x takes 3 seconds.
-const float RISE = 0.5f;
-// Grass rises slower: 1.0x to 3.0x takes 8 seconds, so its extra cells stream in gradually. It also waits until
+// How fast detail rises, in distance multiplier a second. 1.0x to 2.5x takes 2.4 seconds.
+const float RISE = 0.625f;
+// Grass rises slower. 1.0x to 3.0x takes 6.4 seconds. Its extra cells then stream in gradually. It also waits until
 // the other values have reached their settings. After a load the two streaming loads then come one after the
 // other.
-const float GRASS_RISE = 0.25f;
+const float GRASS_RISE = 0.3125f;
 
 // Fields of the game's LOD object (see lod_hook.h).
 const unsigned SECOND_DISTANCE = 0x74D4;
@@ -176,7 +176,7 @@ void update_values(double now, double frame)
     else if (others)
         g_grass = approach(g_grass, g_target_grass, GRASS_RISE * float(std::min(frame, 0.1)));
 
-    // One log line per climb: when the applied values reach the settings, and how long it took.
+    // One log line per climb: when the applied values reach the settings and how long it took.
     const bool reached = others && std::fabs(g_grass - g_target_grass) < 0.001f;
     if (low || reached)
     {

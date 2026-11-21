@@ -57,7 +57,7 @@ uint8_t *find_site()
     return count == 1 ? found : nullptr;
 }
 
-// Executable memory within 2 GB below the site, so a rel32 jump reaches both ways.
+// Executable memory within 2 GB below the site. A rel32 jump then reaches both ways.
 uint8_t *alloc_near(uint8_t *site)
 {
     SYSTEM_INFO si;
@@ -127,7 +127,7 @@ bool write_site(uint64_t bytes)
     DWORD old = 0;
     if (!VirtualProtect(g_site, 8, PAGE_EXECUTE_READWRITE, &old))
         return false;
-    // The site is 8-byte aligned, so the game never sees half a jump.
+    // The site is 8-byte aligned. The game never sees half a jump.
     InterlockedExchange64(reinterpret_cast<volatile LONG64 *>(g_site), LONG64(bytes));
     VirtualProtect(g_site, 8, old, &old);
     FlushInstructionCache(GetCurrentProcess(), g_site, 8);

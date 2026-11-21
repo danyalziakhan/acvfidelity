@@ -12,6 +12,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <d3d12.h>
 
 #include <reshade.hpp>
 
@@ -19,6 +20,8 @@
 #include "pipeline_copy.h"
 #include "shader_patch.h"
 #include "ssr.h"
+#include "ssr_angle.h"
+#include "ssr_upscale_data.h"
 #include "diagnostics.h"
 
 #include <algorithm>
@@ -128,6 +131,43 @@ const rewrite INTENSITY_B = {0x1aac, 11, {0xb000032, 0x100012, 0, 0x10000a, 0, 0
                              9, {0x9000032, 0x100012, 0, 0x10000a, 0, 0x10001a, 0, 0x4001, LIT}, 1, {8}};
 const rewrite *const REWRITES[] = {&EDGE_X, &EDGE_SHARPNESS, &INTENSITY_A, &INTENSITY_B};
 
+// The reflected color is read from the previous frame (T3). The game reads it at this frame's uv and moves
+// the hit only for the edge fade. So reflections trail the camera. The game's reprojected hit runs a frame
+// ahead (tested: panning right puts it to the left). Halfway between the two lines up with the objects:
+// lag measured +4 px, 0 px with this. sample_l r1, r0.xy, T3 then reads r9.xy, filled after the reprojection.
+const size_t AT_REPROJECTED = 0x153c; // div r1.xy, r2.xyxx, r0.wwww
+const uint32_t REPROJECTED_GAME[7] = {0x700000e, 0x100032, 1, 0x100046, 2, 0x100ff6, 0};
+const size_t AT_COLOR_READ = 0x178c; // sample_l r1.xyzw, r0.xyxx, T3[2].xyzw, S0[2], l(0)
+const uint32_t COLOR_READ_GAME[5] = {0xd000048, 0x1000f2, 1, 0x100046, 0};
+// mad r9.xy, r1.xyxx, l(0.5, -0.5), l(0.5, 0.5); add r9.xy, r9, -r0.xy; mad r9.xy, r9, l(share), r0.xy
+// The noise lookup: uv / (pixel size x 64). The pass is half resolution. 64 then puts each pixel between two
+// noise texels. 128 gives every pixel a texel of its own.
+const size_t AT_NOISE = 0x81c + 8 * 4; // mul r0.xy, CB2[0][9].xyxx, l(64, 64, 0, 0)
+// The march keeps the first step within the hit tolerance. Refinement halves the last step a few times,
+// keeping the half where the ray crosses the surface. Before mad r0.xy, r2.xyxx, r0.xxxx, r1.yzyy.
+const size_t AT_HIT = 0x130c;
+const uint32_t HIT_GAME[9] = {0x9000032, 0x100032, 0, 0x100046, 2, 0x100006, 0, 0x100596, 1};
+const uint32_t REFINE_START[93] = {0x8000000, 0x100012, 0x4, 0x10000A, 0x0, 0x8010000A, 0x41, 0x3, 0x7000034, 0x100012, 0x4, 0x10000A, 0x4, 0x4001, 0x0, 0x5000036, 0x100022, 0x4, 0x10000A, 0x0, 0x9000032, 0x100032, 0x6, 0x100046, 0x2, 0x100006, 0x4, 0x100596, 0x1, 0x9000000, 0x100032, 0x6, 0x100046, 0x6, 0x308AE6, 0x2, 0x0, 0x9, 0xD000048, 0x100042, 0x6, 0x100046, 0x6, 0x207C96, 0x4, 0x3, 0x206000, 0x1, 0x0, 0x4001, 0x0, 0x8000000, 0x100082, 0x6, 0x8010002A, 0xC1, 0x6, 0x4001, 0x3F800000, 0x9000032, 0x100012, 0x7, 0x10002A, 0x2, 0x10000A, 0x4, 0x10003A, 0x1, 0x8000000, 0x100012, 0x7, 0x10000A, 0x7, 0x8010003A, 0x41, 0x6, 0xA000032, 0x100012, 0x7, 0x8010002A, 0x41, 0x0, 0x10000A, 0x1, 0x10000A, 0x7, 0x7000031, 0x100042, 0x4, 0x4001, 0x0, 0x10000A, 0x7};
+const uint32_t REFINE_ROUND[112] = {0x7000000, 0x100012, 0x5, 0x10000A, 0x4, 0x10001A, 0x4, 0x7000038, 0x100012, 0x5, 0x10000A, 0x5, 0x4001, 0x3F000000, 0x9000032, 0x100032, 0x6, 0x100046, 0x2, 0x100006, 0x5, 0x100596, 0x1, 0x9000000, 0x100032, 0x6, 0x100046, 0x6, 0x308AE6, 0x2, 0x0, 0x9, 0xD000048, 0x100042, 0x6, 0x100046, 0x6, 0x207C96, 0x4, 0x3, 0x206000, 0x1, 0x0, 0x4001, 0x0, 0x8000000, 0x100082, 0x6, 0x8010002A, 0xC1, 0x6, 0x4001, 0x3F800000, 0x9000032, 0x100012, 0x7, 0x10002A, 0x2, 0x10000A, 0x5, 0x10003A, 0x1, 0x8000000, 0x100012, 0x7, 0x10000A, 0x7, 0x8010003A, 0x41, 0x6, 0xA000032, 0x100012, 0x7, 0x8010002A, 0x41, 0x0, 0x10000A, 0x1, 0x10000A, 0x7, 0x7000031, 0x100022, 0x7, 0x4001, 0x0, 0x10000A, 0x7, 0x7000020, 0x100042, 0x7, 0x10001A, 0x7, 0x10002A, 0x4, 0x9000037, 0x100012, 0x4, 0x10002A, 0x7, 0x10000A, 0x5, 0x10000A, 0x4, 0x9000037, 0x100022, 0x4, 0x10002A, 0x7, 0x10001A, 0x4, 0x10000A, 0x5};
+const uint32_t REFINE_END[5] = {0x5000036, 0x100012, 0x0, 0x10001A, 0x4};
+const uint32_t REPROJECT[35] = {0xF000032, 0x100032, 0x9, 0x100046, 0x1, 0x4002, 0x3F000000, 0xBF000000, 0x0, 0x0, 0x4002, 0x3F000000, 0x3F000000, 0x0, 0x0, 0x8000000, 0x100032, 0x9, 0x100046, 0x9, 0x80100046, 0x41, 0x0, 0xC000032, 0x100032, 0x9, 0x100046, 0x9, 0x4002, 0x3F000000, 0x3F000000, 0x0, 0x0, 0x100046, 0x0};
+const int REPROJECT_SHARE[2] = {29, 30};
+
+// The SSR resolve (a pixel shader after the trace) blends the trace with its history. The reflection is traced
+// at half resolution. So reflected edges show as 2-pixel steps. Softening blends each pixel with its 4
+// neighbors. Measured steps: 1.31 -> 1.15 at 0.5 and 1.08 at 1.0. 1.00 is none. It also limits the history to
+// the range of those 5 pixels against ghosting. Inserted after the history read, sample_l r2, r0.xy, T0.
+const size_t RESOLVE_SIZE = 1564;
+const uint8_t RESOLVE_CHECKSUM[16] = {0x2b, 0x5e, 0x55, 0x19, 0xc3, 0x90, 0x0b, 0x3d,
+                                      0xe4, 0x1b, 0x61, 0xff, 0x98, 0x85, 0xfc, 0xb2};
+const size_t AT_RESOLVE_TEMPS = 0x1c8; // dcl_temps 4
+const size_t AT_RESOLVE_CURRENT = 0x40c; // sample_l r1.xyzw, v1.xyxx, T2[3]
+const uint32_t RESOLVE_CURRENT_GAME[13] = {0xd000048, 0x1000f2, 1, 0x101046, 1, 0x207e46, 2, 3, 0x206000, 0, 0, 0x4001, 0};
+const size_t AT_RESOLVE_HISTORY = 0x440; // sample_l r2.xyzw, r0.xyxx, T0[0]
+const uint32_t RESOLVE_HISTORY_GAME[13] = {0xd000048, 0x1000f2, 2, 0x100046, 0, 0x207e46, 0, 0, 0x206000, 0, 0, 0x4001, 0};
+const uint32_t RESOLVE_BLEND[255] = {0x500007A, 0x100032, 0x4, 0x101046, 0x1, 0x500007C, 0x1000C2, 0x4, 0x101406, 0x1, 0x5000036, 0x1000F2, 0x7, 0x100E46, 0x1, 0x5000036, 0x1000F2, 0x8, 0x100E46, 0x1, 0x5000036, 0x1000F2, 0x3, 0x100E46, 0x1, 0x5000036, 0x100032, 0x5, 0x101046, 0x1, 0x7000000, 0x100012, 0x5, 0x10000A, 0x5, 0x10000A, 0x4, 0xD000048, 0x1000F2, 0x6, 0x100046, 0x5, 0x207E46, 0x2, 0x3, 0x206000, 0x0, 0x0, 0x4001, 0x0, 0x7000033, 0x1000F2, 0x7, 0x100E46, 0x7, 0x100E46, 0x6, 0x7000034, 0x1000F2, 0x8, 0x100E46, 0x8, 0x100E46, 0x6, 0x7000000, 0x1000F2, 0x3, 0x100E46, 0x3, 0x100E46, 0x6, 0x5000036, 0x100032, 0x5, 0x101046, 0x1, 0x8000000, 0x100012, 0x5, 0x10000A, 0x5, 0x8010000A, 0x41, 0x4, 0xD000048, 0x1000F2, 0x6, 0x100046, 0x5, 0x207E46, 0x2, 0x3, 0x206000, 0x0, 0x0, 0x4001, 0x0, 0x7000033, 0x1000F2, 0x7, 0x100E46, 0x7, 0x100E46, 0x6, 0x7000034, 0x1000F2, 0x8, 0x100E46, 0x8, 0x100E46, 0x6, 0x7000000, 0x1000F2, 0x3, 0x100E46, 0x3, 0x100E46, 0x6, 0x5000036, 0x100032, 0x5, 0x101046, 0x1, 0x7000000, 0x100022, 0x5, 0x10001A, 0x5, 0x10003A, 0x4, 0xD000048, 0x1000F2, 0x6, 0x100046, 0x5, 0x207E46, 0x2, 0x3, 0x206000, 0x0, 0x0, 0x4001, 0x0, 0x7000033, 0x1000F2, 0x7, 0x100E46, 0x7, 0x100E46, 0x6, 0x7000034, 0x1000F2, 0x8, 0x100E46, 0x8, 0x100E46, 0x6, 0x7000000, 0x1000F2, 0x3, 0x100E46, 0x3, 0x100E46, 0x6, 0x5000036, 0x100032, 0x5, 0x101046, 0x1, 0x8000000, 0x100022, 0x5, 0x10001A, 0x5, 0x8010003A, 0x41, 0x4, 0xD000048, 0x1000F2, 0x6, 0x100046, 0x5, 0x207E46, 0x2, 0x3, 0x206000, 0x0, 0x0, 0x4001, 0x0, 0x7000033, 0x1000F2, 0x7, 0x100E46, 0x7, 0x100E46, 0x6, 0x7000034, 0x1000F2, 0x8, 0x100E46, 0x8, 0x100E46, 0x6, 0x7000000, 0x1000F2, 0x3, 0x100E46, 0x3, 0x100E46, 0x6, 0x7000034, 0x1000F2, 0x2, 0x100E46, 0x2, 0x100E46, 0x7, 0x7000033, 0x1000F2, 0x2, 0x100E46, 0x2, 0x100E46, 0x8, 0xA000038, 0x1000F2, 0x3, 0x100E46, 0x3, 0x4002, 0x3E4CCCCD, 0x3E4CCCCD, 0x3E4CCCCD, 0x3E4CCCCD, 0x8000000, 0x1000F2, 0x3, 0x100E46, 0x3, 0x80100E46, 0x41, 0x1, 0xC000032, 0x1000F2, 0x1, 0x100E46, 0x3, 0x4002, 0x3F000000, 0x3F000000, 0x3F000000, 0x3F000000, 0x100E46, 0x1};
+const int RESOLVE_SOFT[4] = {249, 250, 251, 252};
+
 // The current values, under g_lock.
 float g_values[SSR_PARAMS];
 
@@ -141,8 +181,10 @@ struct slot
     pipeline_layout layout = {0};
     stored_desc *desc = nullptr;
     std::vector<uint64_t> made;
+    bool resolve = false; // the resolve pass, not the trace
+    int water = -1;       // a water lighting shader (UPSCALE_SHADERS index)
 };
-const int SLOTS = 4;
+const int SLOTS = 8;
 slot g_slots[SLOTS];
 std::mutex g_lock;
 std::atomic<bool> g_ready{false};
@@ -187,26 +229,29 @@ void patch(std::vector<uint8_t> &code, const rewrite &where, std::initializer_li
     memcpy(code.data() + where.at, tokens, where.count * 4);
 }
 
+uint32_t read_u32(const std::vector<uint8_t> &code, size_t at)
+{
+    uint32_t v = 0;
+    if (at + 4 <= code.size())
+        memcpy(&v, code.data() + at, 4);
+    return v;
+}
+
+void write_u32(std::vector<uint8_t> &code, size_t at, uint32_t v)
+{
+    if (at + 4 <= code.size())
+        memcpy(code.data() + at, &v, 4);
+}
+
 bool differs(const float *v, int i)
 {
     return v[i] != SSR_DEFS[i].game;
 }
 
-// Under g_lock.
-void apply_to(slot &s)
+// Patches the game's SSR pixel shader for the values. False if any place differs from the known code or an
+// insertion fails: the game's own pipeline then stays.
+bool make_ssr_copy(std::vector<uint8_t> &code, const float *v)
 {
-    const float *v = g_values;
-    bool any = false;
-    for (int i = 0; i < SSR_PARAMS; ++i)
-        any |= differs(v, i);
-    if (!any)
-    {
-        s.active = 0;
-        return;
-    }
-    const auto *ps = static_cast<const shader_desc *>(s.desc->subs[s.desc->pixel_shader].data);
-    const auto *bytes = static_cast<const uint8_t *>(ps->code);
-    std::vector<uint8_t> code(bytes, bytes + ps->code_size);
     bool matches = true;
     for (const site *where : SITES)
         matches &= memcmp(code.data() + where->at, where->game, where->count * 4) == 0;
@@ -215,11 +260,7 @@ void apply_to(slot &s)
     for (const rewrite *where : REWRITES)
         matches &= memcmp(code.data() + where->at, where->game, where->count * 4) == 0;
     if (!matches)
-    {
-        s.active = 0;
-        dd_log(reshade::log::level::warning, "SSR: the game's SSR shader differs from the known one. Left alone");
-        return;
-    }
+        return false;
     if (differs(v, SSR_SMOOTHING))
         patch(code, SMOOTHING, bits(v[SSR_SMOOTHING]));
     if (differs(v, SSR_THICKNESS))
@@ -266,9 +307,129 @@ void apply_to(slot &s)
         patch(code, INTENSITY_A, {});
         patch(code, INTENSITY_B, {bits(v[SSR_INTENSITY])});
     }
+    // Insertions last, back to front: they move everything after them.
+    const bool motion = differs(v, SSR_MOTION), refine = v[SSR_REFINE] >= 1.0f;
+    if ((motion && (memcmp(code.data() + AT_REPROJECTED, REPROJECTED_GAME, sizeof(REPROJECTED_GAME)) != 0 ||
+                    memcmp(code.data() + AT_COLOR_READ, COLOR_READ_GAME, sizeof(COLOR_READ_GAME)) != 0)) ||
+        (refine && memcmp(code.data() + AT_HIT, HIT_GAME, sizeof(HIT_GAME)) != 0) ||
+        (differs(v, SSR_NOISE) && read_u32(code, AT_NOISE) != bits(64.0f)))
+        return false;
+    if (differs(v, SSR_NOISE))
+        for (int k = 0; k < 2; ++k)
+            write_u32(code, AT_NOISE + 4 * k, bits(v[SSR_NOISE]));
+    if (motion)
+    {
+        write_u32(code, AT_COLOR_READ + 4 * 4, 9); // the coordinate register: r0 to r9
+        uint32_t tokens[std::size(REPROJECT)];
+        memcpy(tokens, REPROJECT, sizeof(tokens));
+        for (int i : REPROJECT_SHARE)
+            tokens[i] = bits(v[SSR_MOTION]);
+        if (!dxbc_insert(code, AT_REPROJECTED + sizeof(REPROJECTED_GAME), tokens, uint32_t(std::size(tokens))))
+            return false;
+    }
+    if (refine)
+    {
+        std::vector<uint32_t> tokens(std::begin(REFINE_START), std::end(REFINE_START));
+        for (int k = 0; k < int(v[SSR_REFINE]); ++k)
+            tokens.insert(tokens.end(), std::begin(REFINE_ROUND), std::end(REFINE_ROUND));
+        tokens.insert(tokens.end(), std::begin(REFINE_END), std::end(REFINE_END));
+        if (!dxbc_insert(code, AT_HIT, tokens.data(), uint32_t(tokens.size())))
+            return false;
+    }
     uint32_t sum[4];
     dxbc_checksum(code.data(), code.size(), sum);
     memcpy(code.data() + 4, sum, 16);
+    return true;
+}
+
+bool is_resolve_shader(const shader_desc &shader)
+{
+    return shader.code != nullptr && shader.code_size == RESOLVE_SIZE &&
+           memcmp(static_cast<const uint8_t *>(shader.code) + 4, RESOLVE_CHECKSUM, 16) == 0;
+}
+
+// Patches the resolve for the softening. False if any place differs from the known code.
+bool make_resolve_copy(std::vector<uint8_t> &code, const float *v)
+{
+    if (memcmp(code.data() + AT_RESOLVE_CURRENT, RESOLVE_CURRENT_GAME, sizeof(RESOLVE_CURRENT_GAME)) != 0 ||
+        memcmp(code.data() + AT_RESOLVE_HISTORY, RESOLVE_HISTORY_GAME, sizeof(RESOLVE_HISTORY_GAME)) != 0 ||
+        read_u32(code, AT_RESOLVE_TEMPS) != 0x2000068 || read_u32(code, AT_RESOLVE_TEMPS + 4) != 4)
+        return false;
+    write_u32(code, AT_RESOLVE_TEMPS + 4, 9);
+    uint32_t tokens[std::size(RESOLVE_BLEND)];
+    memcpy(tokens, RESOLVE_BLEND, sizeof(tokens));
+    for (int i : RESOLVE_SOFT)
+        tokens[i] = bits(v[SSR_SOFTEN]);
+    if (!dxbc_insert(code, AT_RESOLVE_HISTORY + sizeof(RESOLVE_HISTORY_GAME), tokens, uint32_t(std::size(tokens))))
+        return false;
+    uint32_t sum[4];
+    dxbc_checksum(code.data(), code.size(), sum);
+    memcpy(code.data() + 4, sum, 16);
+    return true;
+}
+
+// The water lighting reads the half-resolution reflection with one bilinear sample. Bilinear has a kink at
+// every texel, so reflected edges show 2-pixel steps. The smooth upscale adds a B-spline read (4 bilinear taps)
+// and mixes it in by the setting. Measured at Fidelity III with Softening 0.75: steps 1.07 -> 1.01, about 3%
+// less local contrast. The SSR texel is 2 x the shader's own 1 / full-res size (CB2[0][52].xy).
+int water_shader(const shader_desc &shader)
+{
+    if (shader.code == nullptr)
+        return -1;
+    for (int i = 0; i < int(std::size(UPSCALE_SHADERS)); ++i)
+        if (shader.code_size == UPSCALE_SHADERS[i].size &&
+            memcmp(static_cast<const uint8_t *>(shader.code) + 4, UPSCALE_SHADERS[i].checksum, 16) == 0)
+            return i;
+    return -1;
+}
+
+// False if the read or dcl_temps differ from the known code.
+bool make_upscale_copy(std::vector<uint8_t> &code, const float *v, int which)
+{
+    const upscale_shader &u = UPSCALE_SHADERS[which];
+    if (code.size() != u.size || u.at + sizeof(u.site) > code.size() ||
+        memcmp(code.data() + u.at, u.site, sizeof(u.site)) != 0)
+        return false;
+    const upscale_filter &f = u.filter[v[SSR_UPSCALE_FILTER] >= 1.5f ? 1 : 0];
+    std::vector<uint32_t> post(f.post, f.post + f.post_count);
+    for (int i : f.k)
+        post[i] = bits(v[SSR_UPSCALE]);
+    if (!dxbc_set_temps(code, u.temps + f.temps) ||
+        !dxbc_insert(code, u.at + sizeof(u.site), post.data(), post.size()) ||
+        !dxbc_insert(code, u.at, f.pre, f.pre_count))
+        return false;
+    uint32_t sum[4];
+    dxbc_checksum(code.data(), code.size(), sum);
+    memcpy(code.data() + 4, sum, 16);
+    return true;
+}
+
+// Under g_lock.
+void apply_to(slot &s)
+{
+    const float *v = g_values;
+    bool any = false;
+    for (int i = 0; i < SSR_PARAMS; ++i)
+        any |= s.water >= 0  ? i == SSR_UPSCALE && differs(v, i)
+               : s.resolve   ? i == SSR_SOFTEN && differs(v, i)
+                             : i != SSR_SOFTEN && i != SSR_UPSCALE && i != SSR_UPSCALE_FILTER && i != SSR_ANGLE &&
+                                   differs(v, i);
+    if (!any)
+    {
+        s.active = 0;
+        return;
+    }
+    const auto *ps = static_cast<const shader_desc *>(s.desc->subs[s.desc->pixel_shader].data);
+    const auto *bytes = static_cast<const uint8_t *>(ps->code);
+    std::vector<uint8_t> code(bytes, bytes + ps->code_size);
+    if (!(s.water >= 0 ? make_upscale_copy(code, v, s.water)
+          : s.resolve  ? make_resolve_copy(code, v)
+                       : make_ssr_copy(code, v)))
+    {
+        s.active = 0;
+        dd_log(reshade::log::level::warning, "SSR: the game's SSR shader differs from the known one. Left alone");
+        return;
+    }
 
     std::vector<pipeline_subobject> subs = s.desc->subs;
     shader_desc patched = *ps;
@@ -299,12 +460,18 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
 {
     if (dev->get_api() != device_api::d3d12)
         return;
-    bool ours = false;
+    bool ours = false, resolve = false;
+    int water = -1;
     for (uint32_t i = 0; i < count; ++i)
-        if (subobjects[i].type == pipeline_subobject_type::pixel_shader && subobjects[i].data != nullptr &&
-            is_game_shader(*static_cast<const shader_desc *>(subobjects[i].data)))
-            ours = true;
-    if (!ours)
+        if (subobjects[i].type == pipeline_subobject_type::pixel_shader && subobjects[i].data != nullptr)
+        {
+            const auto &shader = *static_cast<const shader_desc *>(subobjects[i].data);
+            ours |= is_game_shader(shader);
+            resolve |= is_resolve_shader(shader);
+            if (water < 0)
+                water = water_shader(shader);
+        }
+    if (!ours && !resolve && water < 0)
         return;
 
     auto *desc = new stored_desc();
@@ -326,6 +493,8 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
         s.dev = dev;
         s.layout = layout;
         s.desc = desc;
+        s.resolve = resolve;
+        s.water = water;
         apply_to(s);
         s.game = pipe.handle;
         g_ready = true;
@@ -364,8 +533,10 @@ void on_bind_pipeline(command_list *cmd, pipeline_stage stages, pipeline pipe)
         if (s.game.load(std::memory_order_acquire) == pipe.handle)
         {
             const uint64_t active = s.active.load(std::memory_order_acquire);
+            // Set on the D3D12 list directly: ReShade's bind_pipeline would also reset the primitive topology.
             if (active != 0)
-                cmd->bind_pipeline(pipeline_stage::all_graphics, {active});
+                if (auto *native = reinterpret_cast<ID3D12GraphicsCommandList *>(cmd->get_native()); native != nullptr)
+                    native->SetPipelineState(reinterpret_cast<ID3D12PipelineState *>(active));
             diagnostics_bound(cmd, PASS_REFLECTIONS, active != 0);
             return;
         }
@@ -427,6 +598,27 @@ const param_def SSR_DEFS[SSR_PARAMS] = {
     {"Intensity", "Intensity", "Brightness of screen-space reflections. The game uses 1.00. Above\n"
      "1 they can look too strong over the game's other reflections.",
      1, 0, 1.5f, "%.2f", false, false, true},
+    {"MotionFix", "Motion fix", "Stops reflections from lagging behind their objects when the camera turns.\n0 is the game's. "
+     "0.5 measured best. Past 0.75 they run ahead of their objects.",
+     0, 0, 1, "%.2f", false, false, false},
+    {"NoiseTexels", "Noise spread", "How finely the ray start noise spreads over the pixels. 64 is the game's.\n"
+     "128 makes the grain finer.",
+     64, 64, 128, "%.0f", true, false, false},
+    {"Softening", "Softening", "Blends each reflection pixel with its neighbors. Hides the blocky look of the\n"
+     "game's half-resolution reflections at some sharpness. 0 is the game's.",
+     0, 0, 1, "%.2f", false, false, false},
+    {"Refinement", "Hit refinement", "Extra depth checks to find the exact point a ray hits. 0 is the game's.\n"
+     "Each one halves the error. Past 4 it is below a pixel.",
+     0, 0, 4, "%.0f", true, false, false},
+    {"SmoothUpscale", "Smooth upscale", "Reads the half-resolution reflection with a smooth filter instead of the\n"
+     "game's plain one. Removes its 2-pixel steps. 0 is the game's.",
+     0, 0, 1, "%.2f", false, false, false},
+    {"UpscaleFilter", "Upscale filter", "The smooth upscale's filter. 1 is soft (4 reads).\n"
+     "2 is sharp (13 reads) with a little more detail. Bright reflections at night can show steps.",
+     1, 1, 2, "%.0f", true, false, true},
+    {"ReflectionAngle", "Reflection angle", "How steeply the camera can look down before reflections fade out.\n"
+     "The game fades them from 25 to 35 degrees.",
+     35, 35, 80, "%.0f deg", false, false, false},
 };
 
 // The presets change only what was tested in game. Smoothing rises a little per preset. More steps give
@@ -437,13 +629,13 @@ const param_def SSR_DEFS[SSR_PARAMS] = {
 // noise in reflections of trees.
 const float SSR_PRESET_VALUES[PRESETS][SSR_PARAMS] = {
     {0.70f, 2, 1.6f, 128, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.0175f, 1.5f, 0.1f, 0.0125f, 0.70f, 0.95f, 20,
-     3.3333f, 0, 1},
+     3.3333f, 0, 1, 0, 64, 0, 0, 0, 1, 35},
     {0.73f, 1.6f, 1.6f, 512, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.013f, 1.25f, 0.1f, 0.0125f, 0.78f, 0.95f, 20,
-     3.3333f, 0, 1},
-    {0.76f, 1.3f, 1.6f, 1024, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.009f, 1.0f, 0.1f, 0.0125f, 0.87f, 0.95f, 20,
-     3.3333f, 0, 1},
-    {0.79f, 1, 1.6f, 4096, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.005f, 0.5f, 0.1f, 0.0125f, 0.95f, 0.95f, 20,
-     3.3333f, 0, 1},
+     3.3333f, 0, 1, 0.5f, 128, 0.17f, 2, 0.33f, 1, 43},
+    {0.77f, 1.3f, 1.6f, 1024, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.009f, 1.0f, 0.1f, 0.0125f, 0.87f, 0.95f, 20,
+     3.3333f, 0, 1, 0.5f, 128, 0.33f, 3, 0.67f, 1, 52},
+    {0.80f, 1, 1.6f, 4096, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.005f, 0.5f, 0.1f, 0.0125f, 0.95f, 0.95f, 20,
+     3.3333f, 0, 1, 0.5f, 128, 0.5f, 4, 1.0f, 1, 60},
 };
 
 void ssr_register()
@@ -471,6 +663,7 @@ void ssr_set(const float values[SSR_PARAMS])
             same &= g_values[i] == v;
             g_values[i] = v;
         }
+        ssr_angle_set(g_values[SSR_ANGLE]);
         static bool first = true;
         if (same && !first)
             return;

@@ -194,8 +194,8 @@ static std::string where(DWORD64 address)
 }
 
 // The game's own crash handler ends the process without a word in our log.
-// So access violations are logged where they happen, with the module, the
-// offset and the call stack. A game can also raise and handle one on purpose.
+// So access violations are logged where they happen. The line has the module,
+// the offset and the call stack. A game can also raise and handle one on purpose.
 // That is why the count is capped and the line says "if the game crashed".
 static LONG CALLBACK on_exception(EXCEPTION_POINTERS *info)
 {
@@ -237,7 +237,7 @@ static LONG CALLBACK on_exception(EXCEPTION_POINTERS *info)
 }
 
 // Logs every module loaded from the game's folder and its version. Mods live
-// there, and another mod that changes the LOD is the first thing to rule out.
+// there. Another mod that changes the LOD is the first thing to rule out.
 static void log_modules()
 {
     const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());

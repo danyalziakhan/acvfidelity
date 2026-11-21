@@ -20,11 +20,15 @@ add_library(acvfidelity SHARED
     src/common/log.cpp
     src/common/shader_patch.cpp
     src/features/ao.cpp
+    src/features/light.cpp
+    src/features/light_patch.cpp
     src/features/lod.cpp
     src/features/lod_control.cpp
     src/features/lod_hook.cpp
+    src/features/lod_fade.cpp
     src/features/grass.cpp
     src/features/ssr.cpp
+    src/features/ssr_angle.cpp
     src/acvfidelity.rc)
 target_include_directories(acvfidelity PRIVATE
     ${CMAKE_CURRENT_BINARY_DIR}/generated
@@ -36,3 +40,4 @@ target_link_libraries(acvfidelity PRIVATE dxgi shell32 version)
 target_compile_definitions(acvfidelity PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
 target_compile_options(acvfidelity PRIVATE /W3 /utf-8)
 set_target_properties(acvfidelity PROPERTIES SUFFIX ".addon64" INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+

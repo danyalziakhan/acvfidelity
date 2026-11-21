@@ -26,6 +26,7 @@
 
 #include "ao.h"
 #include "diagnostics.h"
+#include "light.h"
 #include "log.h"
 #include "shader_patch.h"
 
@@ -73,7 +74,7 @@ const uint32_t DIRECTION_START[8] = {0x08000036, 0x001000E2, 7, 0x00004002, 0, 0
 //   mul r9.w, r7.y, l(1 - share)
 //   mad r9.w, r4.w, l(share), r9.w
 //   max r7.y, r4.w, r9.w
-// r9.w is unused in the game's shader. The share applies at every step, so it adds up: (1 - share)^steps of
+// r9.w is unused in the game's shader. The share applies at every step. So it adds up: (1 - share)^steps of
 // a thin occluder's shade is left. Share 0 is the game's own.
 // That alone also let shade fade behind pots, crates and rocks. The sink can't tell how wide an object was.
 // So each side counts how many steps in a row stayed on the object that holds its horizon. The counts are
@@ -488,8 +489,8 @@ void apply_to(slot &s)
 {
     const float *v = g_values;
     const bool blur = s.what != kind::ao;
-    // The values this shader carries: the blur's or the AO pass's.
-    const int from = blur ? AO_BLUR_WIDTH : 0, to = blur ? AO_PARAMS : AO_BLUR_WIDTH;
+    // The values this shader carries: the blur's or the AO pass's. The lighting's are light.cpp's.
+    const int from = blur ? AO_BLUR_WIDTH : 0, to = blur ? AO_LIGHT_FIRST : AO_BLUR_WIDTH;
     bool same = s.built_valid;
     for (int i = from; i < to && same; ++i)
         same = s.built[i] == v[i];
@@ -691,15 +692,15 @@ const param_def AO_DEFS[AO_PARAMS] = {
      "The game uses 128.",
      128, 128, 512, "%.0f px", false, true, false},
     {"MaxDistance", "Max distance", "No shade beyond this many meters. It fades out over the last eighth.\n"
-     "The game uses 256, the most. Its lighting fades AO out past that.",
-     256, 32, 256, "%.0f m", false, true, true},
+     "The game uses 256. Far trees and hills keep some shade up to 1024.",
+     256, 32, 1024, "%.0f m", false, true, false},
     {"ThinWidth", "Thin objects width", "Objects narrower than this count as thin for Thin objects.\n"
      "Wider ones keep their full shade.",
      0.25f, 0.05f, 2, "%.2f m", false, true, true},
     {"ThinTolerance", "Thin objects tolerance", "How far a step may dip below the horizon and still count as the same object.\n"
      "Higher keeps bumpy surfaces whole.",
      0.1f, 0, 0.5f, "%.3f", false, false, true},
-    {"SampleSpread", "Sample spread", "How the steps spread out from each pixel. The game uses 1, even spacing.\n"
+    {"SampleSpread", "Sample spread", "How the steps spread out from each pixel. The game uses 1 for even spacing.\n"
      "Higher places more of them close by where contact shade forms.",
      1, 1, 3, "%.1f", false, false, false},
     {"MinOffset", "Min offset", "The first step lands at least this many pixels away at half resolution.\n"
@@ -709,7 +710,7 @@ const param_def AO_DEFS[AO_PARAMS] = {
      "It prevents pitch black spots in tight gaps.",
      0, 0, 0.2f, "%.2f", false, false, false},
     {"ThinCompensation", "Thin compensation", "Occluders far behind a surface count less. The game uses 0.\n"
-     "It greatly reduces the haze grass and leaves put on open ground and snow.",
+     "It reduces the haze grass and leaves put on open ground and snow.",
      0, 0, 8, "%.1f", false, false, false},
     {"BlurWidth", "Blur width", "Spacing of the blur's neighbors in pixels. The game uses 1.\n"
      "0 turns the blur off and shows a checker pattern up close.\n"
@@ -721,13 +722,34 @@ const param_def AO_DEFS[AO_PARAMS] = {
     {"BlurNormal", "Blur normal edge", "How sharply changes in surface direction stop the blur. The game uses 4.\n"
      "Higher keeps creases and corners crisp. Lower blurs across them.",
      4, 0.5f, 32, "%.1f", false, true, true},
+    {"BounceLight", "Bounce light", "Strength of the light that bounces off nearby surfaces into shade.\n"
+     "1 is the game's.",
+     1, 0.5f, 3, "%.2f", false, false, false},
+    {"SunlightOcclusion", "Sunlight occlusion", "Lets AO dim sunlight where it is strong: plant bases, gaps between\n"
+     "stones. 0 is the game's.",
+     0, 0, 1, "%.2f", false, false, false},
+    {"SunlightCurve", "Sunlight occlusion curve", "The power on the AO in sunlight occlusion. Higher keeps it to deep\n"
+     "creases and leaves soft shade alone. 3 is the default.",
+     3, 1, 8, "%.1f", false, false, true},
+    {"BakedShadeBlend", "Baked shade blend", "Combines AO with the material's own baked shade instead of keeping only\n"
+     "the darker one. 0 is the game's.",
+     0, 0, 1, "%.2f", false, false, false},
+    {"SkyLightDay", "Sky light (day)", "Strength of the sky's light in shade by day. 1 is the game's.\n"
+     "It fades to the night value at dusk.",
+     1, 0.5f, 2, "%.2f", false, false, false},
+    {"ContactShadow", "Contact shadow strength", "How dark the game's contact shadows get. 1 is the game's.",
+     1, 0, 2, "%.2f", false, false, true},
+    {"SkyLightNight", "Sky light (night)", "Strength of the sky's light in shade at night. 1 is the game's.",
+     1, 0.5f, 2, "%.2f", false, false, false},
 };
 
+// Lighting: bounce, sunlight occlusion, its curve, baked shade blend, sky light by day, contact shadow strength,
+// sky light at night.
 const float AO_PRESET_VALUES[PRESETS][AO_PARAMS] = {
-    {2, 5, 100, 2, 0, 0.5f, 1, 5, 128, 256, 0.25f, 0.1f, 1, 0, 0, 0, 1, 40, 4},
-    {3, 10, 100, 2, 0.0015f, 0.67f, 1, 5, 213, 256, 0.25f, 0.1f, 2, 1.3f, 0.03f, 2, 1, 40, 4},
-    {4, 20, 100, 2, 0.003f, 0.83f, 1, 5, 299, 256, 0.25f, 0.1f, 2, 1.3f, 0.03f, 2, 1, 40, 4},
-    {5, 30, 100, 2, 0.0045f, 1.0f, 1, 5, 384, 256, 0.25f, 0.1f, 2, 1.3f, 0.03f, 2, 1, 40, 4},
+    {2, 5, 100, 2, 0, 0.5f, 1, 5, 128, 256, 0.25f, 0.1f, 1, 0, 0, 0, 1, 40, 4, 1, 0, 3, 0, 1, 1, 1},
+    {3, 10, 100, 2, 0.002f, 0.67f, 1, 5, 213, 512, 0.25f, 0.1f, 1.4f, 1.3f, 0.03f, 2, 1, 40, 4, 1.25f, 0.17f, 3, 0.5f, 1.07f, 1, 0.9f},
+    {4, 20, 100, 2, 0.004f, 0.83f, 1, 5, 299, 768, 0.25f, 0.1f, 1.4f, 1.3f, 0.03f, 2, 1, 40, 4, 1.5f, 0.33f, 3, 1, 1.13f, 1, 0.8f},
+    {5, 30, 100, 2, 0.006f, 1.0f, 1, 5, 384, 1024, 0.25f, 0.1f, 1.4f, 1.3f, 0.03f, 2, 1, 40, 4, 1.75f, 0.5f, 3, 1, 1.2f, 1, 0.7f},
 };
 
 void ao_register()
@@ -737,10 +759,12 @@ void ao_register()
     reshade::register_event<reshade::addon_event::bind_pipeline>(on_bind_pipeline);
     reshade::register_event<reshade::addon_event::reshade_present>(on_present);
     reshade::register_event<reshade::addon_event::destroy_device>(on_destroy_device);
+    light_register();
 }
 
 void ao_unregister()
 {
+    light_unregister();
     reshade::unregister_event<reshade::addon_event::destroy_device>(on_destroy_device);
     reshade::unregister_event<reshade::addon_event::reshade_present>(on_present);
     reshade::unregister_event<reshade::addon_event::bind_pipeline>(on_bind_pipeline);
@@ -750,6 +774,7 @@ void ao_unregister()
 
 void ao_set(const float values[AO_PARAMS])
 {
+    float clamped[AO_PARAMS];
     {
         std::lock_guard lock(g_lock);
         bool same = true;
@@ -758,12 +783,14 @@ void ao_set(const float values[AO_PARAMS])
             const float v = std::clamp(values[i], AO_DEFS[i].min, AO_DEFS[i].max);
             same &= g_values[i] == v;
             g_values[i] = v;
+            clamped[i] = v;
         }
         static bool first = true;
         if (same && !first)
             return;
         first = false;
     }
+    light_set(clamped);
     apply_all();
 }
 
