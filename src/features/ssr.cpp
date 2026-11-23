@@ -131,15 +131,6 @@ const rewrite INTENSITY_B = {0x1aac, 11, {0xb000032, 0x100012, 0, 0x10000a, 0, 0
                              9, {0x9000032, 0x100012, 0, 0x10000a, 0, 0x10001a, 0, 0x4001, LIT}, 1, {8}};
 const rewrite *const REWRITES[] = {&EDGE_X, &EDGE_SHARPNESS, &INTENSITY_A, &INTENSITY_B};
 
-// The reflected color is read from the previous frame (T3). The game reads it at this frame's uv and moves
-// the hit only for the edge fade. So reflections trail the camera. The game's reprojected hit runs a frame
-// ahead (tested: panning right puts it to the left). Halfway between the two lines up with the objects:
-// lag measured +4 px, 0 px with this. sample_l r1, r0.xy, T3 then reads r9.xy, filled after the reprojection.
-const size_t AT_REPROJECTED = 0x153c; // div r1.xy, r2.xyxx, r0.wwww
-const uint32_t REPROJECTED_GAME[7] = {0x700000e, 0x100032, 1, 0x100046, 2, 0x100ff6, 0};
-const size_t AT_COLOR_READ = 0x178c; // sample_l r1.xyzw, r0.xyxx, T3[2].xyzw, S0[2], l(0)
-const uint32_t COLOR_READ_GAME[5] = {0xd000048, 0x1000f2, 1, 0x100046, 0};
-// mad r9.xy, r1.xyxx, l(0.5, -0.5), l(0.5, 0.5); add r9.xy, r9, -r0.xy; mad r9.xy, r9, l(share), r0.xy
 // The noise lookup: uv / (pixel size x 64). The pass is half resolution. 64 then puts each pixel between two
 // noise texels. 128 gives every pixel a texel of its own.
 const size_t AT_NOISE = 0x81c + 8 * 4; // mul r0.xy, CB2[0][9].xyxx, l(64, 64, 0, 0)
@@ -150,8 +141,6 @@ const uint32_t HIT_GAME[9] = {0x9000032, 0x100032, 0, 0x100046, 2, 0x100006, 0, 
 const uint32_t REFINE_START[93] = {0x8000000, 0x100012, 0x4, 0x10000A, 0x0, 0x8010000A, 0x41, 0x3, 0x7000034, 0x100012, 0x4, 0x10000A, 0x4, 0x4001, 0x0, 0x5000036, 0x100022, 0x4, 0x10000A, 0x0, 0x9000032, 0x100032, 0x6, 0x100046, 0x2, 0x100006, 0x4, 0x100596, 0x1, 0x9000000, 0x100032, 0x6, 0x100046, 0x6, 0x308AE6, 0x2, 0x0, 0x9, 0xD000048, 0x100042, 0x6, 0x100046, 0x6, 0x207C96, 0x4, 0x3, 0x206000, 0x1, 0x0, 0x4001, 0x0, 0x8000000, 0x100082, 0x6, 0x8010002A, 0xC1, 0x6, 0x4001, 0x3F800000, 0x9000032, 0x100012, 0x7, 0x10002A, 0x2, 0x10000A, 0x4, 0x10003A, 0x1, 0x8000000, 0x100012, 0x7, 0x10000A, 0x7, 0x8010003A, 0x41, 0x6, 0xA000032, 0x100012, 0x7, 0x8010002A, 0x41, 0x0, 0x10000A, 0x1, 0x10000A, 0x7, 0x7000031, 0x100042, 0x4, 0x4001, 0x0, 0x10000A, 0x7};
 const uint32_t REFINE_ROUND[112] = {0x7000000, 0x100012, 0x5, 0x10000A, 0x4, 0x10001A, 0x4, 0x7000038, 0x100012, 0x5, 0x10000A, 0x5, 0x4001, 0x3F000000, 0x9000032, 0x100032, 0x6, 0x100046, 0x2, 0x100006, 0x5, 0x100596, 0x1, 0x9000000, 0x100032, 0x6, 0x100046, 0x6, 0x308AE6, 0x2, 0x0, 0x9, 0xD000048, 0x100042, 0x6, 0x100046, 0x6, 0x207C96, 0x4, 0x3, 0x206000, 0x1, 0x0, 0x4001, 0x0, 0x8000000, 0x100082, 0x6, 0x8010002A, 0xC1, 0x6, 0x4001, 0x3F800000, 0x9000032, 0x100012, 0x7, 0x10002A, 0x2, 0x10000A, 0x5, 0x10003A, 0x1, 0x8000000, 0x100012, 0x7, 0x10000A, 0x7, 0x8010003A, 0x41, 0x6, 0xA000032, 0x100012, 0x7, 0x8010002A, 0x41, 0x0, 0x10000A, 0x1, 0x10000A, 0x7, 0x7000031, 0x100022, 0x7, 0x4001, 0x0, 0x10000A, 0x7, 0x7000020, 0x100042, 0x7, 0x10001A, 0x7, 0x10002A, 0x4, 0x9000037, 0x100012, 0x4, 0x10002A, 0x7, 0x10000A, 0x5, 0x10000A, 0x4, 0x9000037, 0x100022, 0x4, 0x10002A, 0x7, 0x10001A, 0x4, 0x10000A, 0x5};
 const uint32_t REFINE_END[5] = {0x5000036, 0x100012, 0x0, 0x10001A, 0x4};
-const uint32_t REPROJECT[35] = {0xF000032, 0x100032, 0x9, 0x100046, 0x1, 0x4002, 0x3F000000, 0xBF000000, 0x0, 0x0, 0x4002, 0x3F000000, 0x3F000000, 0x0, 0x0, 0x8000000, 0x100032, 0x9, 0x100046, 0x9, 0x80100046, 0x41, 0x0, 0xC000032, 0x100032, 0x9, 0x100046, 0x9, 0x4002, 0x3F000000, 0x3F000000, 0x0, 0x0, 0x100046, 0x0};
-const int REPROJECT_SHARE[2] = {29, 30};
 
 // The SSR resolve (a pixel shader after the trace) blends the trace with its history. The reflection is traced
 // at half resolution. So reflected edges show as 2-pixel steps. Softening blends each pixel with its 4
@@ -168,6 +157,47 @@ const uint32_t RESOLVE_HISTORY_GAME[13] = {0xd000048, 0x1000f2, 2, 0x100046, 0, 
 const uint32_t RESOLVE_BLEND[255] = {0x500007A, 0x100032, 0x4, 0x101046, 0x1, 0x500007C, 0x1000C2, 0x4, 0x101406, 0x1, 0x5000036, 0x1000F2, 0x7, 0x100E46, 0x1, 0x5000036, 0x1000F2, 0x8, 0x100E46, 0x1, 0x5000036, 0x1000F2, 0x3, 0x100E46, 0x1, 0x5000036, 0x100032, 0x5, 0x101046, 0x1, 0x7000000, 0x100012, 0x5, 0x10000A, 0x5, 0x10000A, 0x4, 0xD000048, 0x1000F2, 0x6, 0x100046, 0x5, 0x207E46, 0x2, 0x3, 0x206000, 0x0, 0x0, 0x4001, 0x0, 0x7000033, 0x1000F2, 0x7, 0x100E46, 0x7, 0x100E46, 0x6, 0x7000034, 0x1000F2, 0x8, 0x100E46, 0x8, 0x100E46, 0x6, 0x7000000, 0x1000F2, 0x3, 0x100E46, 0x3, 0x100E46, 0x6, 0x5000036, 0x100032, 0x5, 0x101046, 0x1, 0x8000000, 0x100012, 0x5, 0x10000A, 0x5, 0x8010000A, 0x41, 0x4, 0xD000048, 0x1000F2, 0x6, 0x100046, 0x5, 0x207E46, 0x2, 0x3, 0x206000, 0x0, 0x0, 0x4001, 0x0, 0x7000033, 0x1000F2, 0x7, 0x100E46, 0x7, 0x100E46, 0x6, 0x7000034, 0x1000F2, 0x8, 0x100E46, 0x8, 0x100E46, 0x6, 0x7000000, 0x1000F2, 0x3, 0x100E46, 0x3, 0x100E46, 0x6, 0x5000036, 0x100032, 0x5, 0x101046, 0x1, 0x7000000, 0x100022, 0x5, 0x10001A, 0x5, 0x10003A, 0x4, 0xD000048, 0x1000F2, 0x6, 0x100046, 0x5, 0x207E46, 0x2, 0x3, 0x206000, 0x0, 0x0, 0x4001, 0x0, 0x7000033, 0x1000F2, 0x7, 0x100E46, 0x7, 0x100E46, 0x6, 0x7000034, 0x1000F2, 0x8, 0x100E46, 0x8, 0x100E46, 0x6, 0x7000000, 0x1000F2, 0x3, 0x100E46, 0x3, 0x100E46, 0x6, 0x5000036, 0x100032, 0x5, 0x101046, 0x1, 0x8000000, 0x100022, 0x5, 0x10001A, 0x5, 0x8010003A, 0x41, 0x4, 0xD000048, 0x1000F2, 0x6, 0x100046, 0x5, 0x207E46, 0x2, 0x3, 0x206000, 0x0, 0x0, 0x4001, 0x0, 0x7000033, 0x1000F2, 0x7, 0x100E46, 0x7, 0x100E46, 0x6, 0x7000034, 0x1000F2, 0x8, 0x100E46, 0x8, 0x100E46, 0x6, 0x7000000, 0x1000F2, 0x3, 0x100E46, 0x3, 0x100E46, 0x6, 0x7000034, 0x1000F2, 0x2, 0x100E46, 0x2, 0x100E46, 0x7, 0x7000033, 0x1000F2, 0x2, 0x100E46, 0x2, 0x100E46, 0x8, 0xA000038, 0x1000F2, 0x3, 0x100E46, 0x3, 0x4002, 0x3E4CCCCD, 0x3E4CCCCD, 0x3E4CCCCD, 0x3E4CCCCD, 0x8000000, 0x1000F2, 0x3, 0x100E46, 0x3, 0x80100E46, 0x41, 0x1, 0xC000032, 0x1000F2, 0x1, 0x100E46, 0x3, 0x4002, 0x3F000000, 0x3F000000, 0x3F000000, 0x3F000000, 0x100E46, 0x1};
 const int RESOLVE_SOFT[4] = {249, 250, 251, 252};
 
+// The full-resolution trace. When the SSR target is as wide as the render the game draws another trace
+// pipeline: C9A8678E8FE3A555, or 7495F4143CFC22E9 where the water asks for adaptive steps. Both read the reflected
+// color with a mip level from a cone (the water's roughness): the native full-resolution look. The same edits are
+// made through tables generated from each shader. Index 0 is FB8890B0AE408321 and
+// must equal the hand-made places above.
+struct trace_variant
+{
+    size_t size;
+    uint8_t checksum[16];
+    site sites[9];       // SMOOTHING, THICKNESS, LENGTH, COUNT_ITOF, COUNT_UTOF, COUNT_LOOP, DISTANCE_SMOOTHING,
+                         // EDGE_Y, SKY
+    literal literals[7]; // FAR_DETAIL, RAY_CUTOFF, SHORT_THICKNESS, FAR_THICKNESS, JITTER, JITTER_RAMP, START_OFFSET
+    rewrite rewrites[4]; // EDGE_X, EDGE_SHARPNESS, INTENSITY_A, INTENSITY_B
+    size_t at_noise;
+    size_t at_hit;
+    uint32_t hit_game[9];
+    const uint32_t *refine_start;
+    size_t refine_start_count;
+    const uint32_t *refine_round;
+    size_t refine_round_count;
+    const uint32_t *refine_end;
+    size_t refine_end_count;
+    // mul r0.w, r0.w, l(1.0) after log2 of the cone's size in pixels: the mip level's scale. 0 for none.
+    size_t at_mip;
+};
+// Sharp in motion in the resolve (5948665FA4947B9F).
+struct resolve_motion
+{
+    size_t size;
+    uint8_t checksum[16];
+    // HistoryMotion: motion_a after the history uv (s = 1 at rest, 0 in motion), motion_b after utof r0.z.
+    size_t at_motion_a;
+    const uint32_t *motion_a;
+    size_t motion_a_count;
+    size_t at_motion_b;
+    const uint32_t *motion_b;
+    size_t motion_b_count;
+};
+#include "ssr_trace_data.h"
+const int TRACE_VARIANTS_COUNT = int(std::size(TRACE_VARIANTS));
+
 // The current values, under g_lock.
 float g_values[SSR_PARAMS];
 
@@ -183,8 +213,11 @@ struct slot
     std::vector<uint64_t> made;
     bool resolve = false; // the resolve pass, not the trace
     int water = -1;       // a water lighting shader (UPSCALE_SHADERS index)
+    int trace = -1; // TRACE_VARIANTS index
+    // Water: the copy for a three-quarter target. Resolve: the copy for a full-size target (no softening). 0: none.
+    std::atomic<uint64_t> active_alt{0};
 };
-const int SLOTS = 8;
+const int SLOTS = 12;
 slot g_slots[SLOTS];
 std::mutex g_lock;
 std::atomic<bool> g_ready{false};
@@ -195,12 +228,6 @@ uint32_t bits(float f)
     uint32_t v;
     memcpy(&v, &f, 4);
     return v;
-}
-
-bool is_game_shader(const shader_desc &shader)
-{
-    return shader.code != nullptr && shader.code_size == SHADER_SIZE &&
-           memcmp(static_cast<const uint8_t *>(shader.code) + 4, SHADER_CHECKSUM, 16) == 0;
 }
 
 void patch(std::vector<uint8_t> &code, const site &where, uint32_t value)
@@ -308,25 +335,13 @@ bool make_ssr_copy(std::vector<uint8_t> &code, const float *v)
         patch(code, INTENSITY_B, {bits(v[SSR_INTENSITY])});
     }
     // Insertions last, back to front: they move everything after them.
-    const bool motion = differs(v, SSR_MOTION), refine = v[SSR_REFINE] >= 1.0f;
-    if ((motion && (memcmp(code.data() + AT_REPROJECTED, REPROJECTED_GAME, sizeof(REPROJECTED_GAME)) != 0 ||
-                    memcmp(code.data() + AT_COLOR_READ, COLOR_READ_GAME, sizeof(COLOR_READ_GAME)) != 0)) ||
-        (refine && memcmp(code.data() + AT_HIT, HIT_GAME, sizeof(HIT_GAME)) != 0) ||
+    const bool refine = v[SSR_REFINE] >= 1.0f;
+    if ((refine && memcmp(code.data() + AT_HIT, HIT_GAME, sizeof(HIT_GAME)) != 0) ||
         (differs(v, SSR_NOISE) && read_u32(code, AT_NOISE) != bits(64.0f)))
         return false;
     if (differs(v, SSR_NOISE))
         for (int k = 0; k < 2; ++k)
             write_u32(code, AT_NOISE + 4 * k, bits(v[SSR_NOISE]));
-    if (motion)
-    {
-        write_u32(code, AT_COLOR_READ + 4 * 4, 9); // the coordinate register: r0 to r9
-        uint32_t tokens[std::size(REPROJECT)];
-        memcpy(tokens, REPROJECT, sizeof(tokens));
-        for (int i : REPROJECT_SHARE)
-            tokens[i] = bits(v[SSR_MOTION]);
-        if (!dxbc_insert(code, AT_REPROJECTED + sizeof(REPROJECTED_GAME), tokens, uint32_t(std::size(tokens))))
-            return false;
-    }
     if (refine)
     {
         std::vector<uint32_t> tokens(std::begin(REFINE_START), std::end(REFINE_START));
@@ -341,6 +356,137 @@ bool make_ssr_copy(std::vector<uint8_t> &code, const float *v)
     memcpy(code.data() + 4, sum, 16);
     return true;
 }
+
+int trace_variant_of(const shader_desc &shader)
+{
+    if (shader.code == nullptr)
+        return -1;
+    for (int i = 0; i < TRACE_VARIANTS_COUNT; ++i)
+        if (shader.code_size == TRACE_VARIANTS[i].size &&
+            memcmp(static_cast<const uint8_t *>(shader.code) + 4, TRACE_VARIANTS[i].checksum, 16) == 0)
+            return i;
+    return -1;
+}
+
+// make_ssr_copy for any trace variant, through its tables. Index 0 gives the same bytes as make_ssr_copy.
+bool make_trace_copy(std::vector<uint8_t> &code, const float *v, const trace_variant &t)
+{
+    bool matches = code.size() == t.size;
+    for (const site &where : t.sites)
+        matches &= where.at + where.count * 4 <= code.size() &&
+                   memcmp(code.data() + where.at, where.game, where.count * 4) == 0;
+    for (const literal &where : t.literals)
+        matches &= where.at + 4 <= code.size() && memcmp(code.data() + where.at, &where.game, 4) == 0;
+    for (const rewrite &where : t.rewrites)
+        matches &= where.at + where.count * 4 <= code.size() &&
+                   memcmp(code.data() + where.at, where.game, where.count * 4) == 0;
+    matches &= t.at_mip == 0 || read_u32(code, t.at_mip) == bits(1.0f);
+    if (!matches)
+        return false;
+    const site &smoothing = t.sites[0], &thickness = t.sites[1], &length = t.sites[2], &count_itof = t.sites[3],
+               &count_utof = t.sites[4], &count_loop = t.sites[5], &distance = t.sites[6], &edge_y = t.sites[7],
+               &sky = t.sites[8];
+    if (differs(v, SSR_SMOOTHING))
+        patch(code, smoothing, bits(v[SSR_SMOOTHING]));
+    if (differs(v, SSR_THICKNESS))
+        patch(code, thickness, bits(v[SSR_THICKNESS]));
+    if (differs(v, SSR_LENGTH))
+        patch(code, length, bits(v[SSR_LENGTH]));
+    if (differs(v, SSR_STEPS))
+    {
+        const uint32_t samples = std::max(uint32_t(v[SSR_STEPS]) / 4 * 4, 4u);
+        patch(code, count_itof, samples);
+        patch(code, count_utof, samples);
+        patch(code, count_loop, samples);
+    }
+    if (differs(v, SSR_DISTANCE_SMOOTHING))
+        patch(code, distance, bits(v[SSR_DISTANCE_SMOOTHING]));
+    if (differs(v, SSR_EDGE_Y))
+        patch(code, edge_y, bits(v[SSR_EDGE_Y]));
+    if (differs(v, SSR_SKY))
+        patch(code, sky, bits(v[SSR_SKY]));
+    auto set = [&](const literal &where, float value) { memcpy(code.data() + where.at, &value, 4); };
+    if (differs(v, SSR_FAR_DETAIL))
+        set(t.literals[0], v[SSR_FAR_DETAIL]);
+    if (differs(v, SSR_RAY_CUTOFF))
+        set(t.literals[1], v[SSR_RAY_CUTOFF]);
+    if (differs(v, SSR_SHORT_THICKNESS))
+        set(t.literals[2], 1.0f / v[SSR_SHORT_THICKNESS]);
+    if (differs(v, SSR_FAR_THICKNESS))
+        set(t.literals[3], v[SSR_FAR_THICKNESS]);
+    if (differs(v, SSR_JITTER))
+        set(t.literals[4], v[SSR_JITTER]);
+    if (differs(v, SSR_JITTER_RAMP))
+        set(t.literals[5], v[SSR_JITTER_RAMP]);
+    if (differs(v, SSR_START_OFFSET))
+        set(t.literals[6], v[SSR_START_OFFSET]);
+    if (differs(v, SSR_EDGE_X) || differs(v, SSR_EDGE_X_SHARPNESS) || differs(v, SSR_EDGE_Y_SHARPNESS))
+    {
+        patch(code, t.rewrites[0],
+              {bits(-v[SSR_EDGE_X]), bits(v[SSR_EDGE_X_SHARPNESS]), bits(v[SSR_EDGE_Y_SHARPNESS])});
+        patch(code, t.rewrites[1], {});
+    }
+    if (differs(v, SSR_INTENSITY))
+    {
+        patch(code, t.rewrites[2], {});
+        patch(code, t.rewrites[3], {bits(v[SSR_INTENSITY])});
+    }
+    if (t.at_mip != 0 && differs(v, SSR_MIP_SCALE))
+        write_u32(code, t.at_mip, bits(v[SSR_MIP_SCALE]));
+    // Insertions last, back to front: they move everything after them.
+    const bool refine = v[SSR_REFINE] >= 1.0f;
+    if ((refine && memcmp(code.data() + t.at_hit, t.hit_game, sizeof(t.hit_game)) != 0) ||
+        (differs(v, SSR_NOISE) && read_u32(code, t.at_noise) != bits(64.0f)))
+        return false;
+    if (differs(v, SSR_NOISE))
+        for (int k = 0; k < 2; ++k)
+            write_u32(code, t.at_noise + 4 * k, bits(v[SSR_NOISE]));
+    if (refine)
+    {
+        std::vector<uint32_t> tokens(t.refine_start, t.refine_start + t.refine_start_count);
+        for (int k = 0; k < int(v[SSR_REFINE]); ++k)
+            tokens.insert(tokens.end(), t.refine_round, t.refine_round + t.refine_round_count);
+        tokens.insert(tokens.end(), t.refine_end, t.refine_end + t.refine_end_count);
+        if (!dxbc_insert(code, t.at_hit, tokens.data(), uint32_t(tokens.size())))
+            return false;
+    }
+    uint32_t sum[4];
+    dxbc_checksum(code.data(), code.size(), sum);
+    memcpy(code.data() + 4, sum, 16);
+    return true;
+}
+
+// The values a full-resolution trace gets. The full path is the native one: what only hid the half-resolution
+// 2-pixel steps is dropped (Softening, Smooth upscale: their passes keep the game's pipelines while the target is
+// full size, see on_bind_pipeline). Steps, Thickness, Far thickness, Jitter, Start offset and Ray length are in
+// units of the ray (a share of its screen length), so they mean the same at any resolution. Noise spread maps one
+// noise texel to one trace pixel at 64 at either size. Distance smoothing reads the pixel's own footprint, so it
+// already follows the pixel. Hit refinement halves the remaining error in ray units each round: a full-resolution
+// pixel is half as wide, so it takes one round more for the same error in pixels (up to 4).
+void full_res_values(const float *v, float *out)
+{
+    memcpy(out, v, sizeof(float) * SSR_PARAMS);
+    if (v[SSR_REFINE] >= 1.0f)
+        out[SSR_REFINE] = std::min(v[SSR_REFINE] + 1.0f, SSR_DEFS[SSR_REFINE].max);
+    out[SSR_SOFTEN] = SSR_DEFS[SSR_SOFTEN].game;
+    out[SSR_UPSCALE] = SSR_DEFS[SSR_UPSCALE].game;
+}
+
+// Three quarters (1440x900 at 1920x1200): the game keeps the half-resolution trace FB8890 there, at the new size.
+// The rule above: a pixel is 2/3 of a half-resolution one, so the same error in pixels takes log2(1.5) = 0.58 more
+// refinement rounds: one more (up to 4). Everything in ray units stays. The water lighting still upscales (by 4/3),
+// so Smooth upscale stays, with the 4/3 texel (make_upscale_copy_ratio). Softening blends with the 4 neighbours one
+// target pixel away (ddx and ddy of the uv in the resolve), so its reach shrinks with the texel as the steps do:
+// the same value means the same relative smoothing. It stays.
+void three_quarter_values(const float *v, float *out)
+{
+    memcpy(out, v, sizeof(float) * SSR_PARAMS);
+    if (v[SSR_REFINE] >= 1.0f)
+        out[SSR_REFINE] = std::min(v[SSR_REFINE] + 1.0f, SSR_DEFS[SSR_REFINE].max);
+}
+
+const char *const RESOLUTION_NAMES[3] = {"Half", "Three quarters", "Full"};
+const char *const SWITCH_NAMES[2] = {"Off", "On"};
 
 bool is_resolve_shader(const shader_desc &shader)
 {
@@ -366,6 +512,40 @@ bool make_resolve_copy(std::vector<uint8_t> &code, const float *v)
     dxbc_checksum(code.data(), code.size(), sum);
     memcpy(code.data() + 4, sum, 16);
     return true;
+}
+
+// The resolve with Sharp in motion: the history weight n is scaled by s = sat(1 + bound - |offset|). offset is the
+// game's own history offset in target texels. At rest it moves only by the jitter change, at most 1 render pixel
+// per axis: bound = sqrt(2) x target width / render width. So s is 1 at rest (the game's blend) and 0 from one texel
+// of real motion on (no blend of two frames). And the softening.
+bool make_resolve_copy_ex(std::vector<uint8_t> &code, const float *v)
+{
+    const resolve_motion &r = RESOLVE_MOTION;
+    const bool motion = v[SSR_HISTORY_MOTION] >= 0.5f;
+    if (motion && (code.size() != r.size || memcmp(code.data() + 4, r.checksum, 16) != 0))
+        return false;
+    // Back to front: motion B (after the count's conversion), the softening with its history clamp, motion A (after
+    // the history uv).
+    if (motion && !dxbc_insert(code, r.at_motion_b, r.motion_b, uint32_t(r.motion_b_count)))
+        return false;
+    if (differs(v, SSR_SOFTEN) && !make_resolve_copy(code, v))
+        return false;
+    if (motion && (!dxbc_insert(code, r.at_motion_a, r.motion_a, uint32_t(r.motion_a_count)) ||
+                   !dxbc_set_temps(code, 15)))
+        return false;
+    if (motion)
+    {
+        uint32_t sum[4];
+        dxbc_checksum(code.data(), code.size(), sum);
+        memcpy(code.data() + 4, sum, 16);
+    }
+    return true;
+}
+
+// True when the resolve gets edits to its history read.
+bool history_edits(const float *v)
+{
+    return v[SSR_HISTORY_MOTION] >= 0.5f;
 }
 
 // The water lighting reads the half-resolution reflection with one bilinear sample. Bilinear has a kink at
@@ -404,16 +584,81 @@ bool make_upscale_copy(std::vector<uint8_t> &code, const float *v, int which)
     return true;
 }
 
+// The first instruction of every upscale's pre block is mul rA.xy, CB2[0][52].xyxx, l(2.0, 2.0, 0, 0): the SSR texel
+// as a multiple of the render pixel. Tokens 8 and 9 hold the two 2.0. The ratio replaces them (4/3 at three
+// quarters). Same bytes as make_upscale_copy at 2.
+const int UPSCALE_RATIO_AT[2] = {8, 9};
+
+bool make_upscale_copy_ratio(std::vector<uint8_t> &code, const float *v, int which, float ratio)
+{
+    const upscale_shader &u = UPSCALE_SHADERS[which];
+    if (code.size() != u.size || u.at + sizeof(u.site) > code.size() ||
+        memcmp(code.data() + u.at, u.site, sizeof(u.site)) != 0)
+        return false;
+    const upscale_filter &f = u.filter[v[SSR_UPSCALE_FILTER] >= 1.5f ? 1 : 0];
+    std::vector<uint32_t> pre(f.pre, f.pre + f.pre_count);
+    for (int i : UPSCALE_RATIO_AT)
+    {
+        if (pre.size() <= size_t(i) || pre[i] != bits(2.0f))
+            return false;
+        pre[i] = bits(ratio);
+    }
+    std::vector<uint32_t> post(f.post, f.post + f.post_count);
+    for (int i : f.k)
+        post[i] = bits(v[SSR_UPSCALE]);
+    if (!dxbc_set_temps(code, u.temps + f.temps) ||
+        !dxbc_insert(code, u.at + sizeof(u.site), post.data(), post.size()) ||
+        !dxbc_insert(code, u.at, pre.data(), pre.size()))
+        return false;
+    uint32_t sum[4];
+    dxbc_checksum(code.data(), code.size(), sum);
+    memcpy(code.data() + 4, sum, 16);
+    return true;
+}
+
+// A pipeline from the slot's description with this pixel shader code. 0 on failure.
+uint64_t make_pipeline(slot &s, const std::vector<uint8_t> &code)
+{
+    const auto *ps = static_cast<const shader_desc *>(s.desc->subs[s.desc->pixel_shader].data);
+    std::vector<pipeline_subobject> subs = s.desc->subs;
+    shader_desc patched = *ps;
+    patched.code = code.data();
+    patched.code_size = code.size();
+    subs[s.desc->pixel_shader].data = &patched;
+    pipeline copy = {0};
+    if (!s.dev->create_pipeline(s.layout, uint32_t(subs.size()), subs.data(), &copy))
+        return 0;
+    s.made.push_back(copy.handle);
+    return copy.handle;
+}
+
 // Under g_lock.
 void apply_to(slot &s)
 {
     const float *v = g_values;
+    // The full-resolution traces get the full rules. The half-resolution trace also runs at three quarters: when the
+    // setting asks for that, its copy gets those rules.
+    float full[SSR_PARAMS];
+    if (s.trace > 0)
+    {
+        full_res_values(g_values, full);
+        v = full;
+    }
+    else if (s.trace == 0 && int(g_values[SSR_RESOLUTION] + 0.5f) == 1)
+    {
+        three_quarter_values(g_values, full);
+        v = full;
+    }
+    s.active_alt = 0;
     bool any = false;
     for (int i = 0; i < SSR_PARAMS; ++i)
         any |= s.water >= 0  ? i == SSR_UPSCALE && differs(v, i)
                : s.resolve   ? i == SSR_SOFTEN && differs(v, i)
                              : i != SSR_SOFTEN && i != SSR_UPSCALE && i != SSR_UPSCALE_FILTER && i != SSR_ANGLE &&
+                                   i != SSR_RESOLUTION && (i != SSR_MIP_SCALE || s.trace > 0) &&
+                                   i != SSR_HISTORY_MOTION &&
                                    differs(v, i);
+    any |= s.resolve && history_edits(v);
     if (!any)
     {
         s.active = 0;
@@ -423,8 +668,8 @@ void apply_to(slot &s)
     const auto *bytes = static_cast<const uint8_t *>(ps->code);
     std::vector<uint8_t> code(bytes, bytes + ps->code_size);
     if (!(s.water >= 0 ? make_upscale_copy(code, v, s.water)
-          : s.resolve  ? make_resolve_copy(code, v)
-                       : make_ssr_copy(code, v)))
+          : s.resolve  ? make_resolve_copy_ex(code, v)
+                       : make_trace_copy(code, v, TRACE_VARIANTS[s.trace])))
     {
         s.active = 0;
         dd_log(reshade::log::level::warning, "SSR: the game's SSR shader differs from the known one. Left alone");
@@ -445,6 +690,23 @@ void apply_to(slot &s)
     }
     s.made.push_back(copy.handle);
     s.active = copy.handle;
+    // The water lighting's second copy, for a three-quarter target.
+    if (s.water >= 0)
+    {
+        std::vector<uint8_t> code3(bytes, bytes + ps->code_size);
+        if (make_upscale_copy_ratio(code3, v, s.water, 4.0f / 3.0f))
+            s.active_alt = make_pipeline(s, code3);
+    }
+    // The resolve's second copy, for a full-size target: no softening, only the history read's edits.
+    if (s.resolve && history_edits(v))
+    {
+        float plain[SSR_PARAMS];
+        memcpy(plain, v, sizeof(plain));
+        plain[SSR_SOFTEN] = SSR_DEFS[SSR_SOFTEN].game;
+        std::vector<uint8_t> codef(bytes, bytes + ps->code_size);
+        if (make_resolve_copy_ex(codef, plain))
+            s.active_alt = make_pipeline(s, codef);
+    }
 }
 
 void apply_all()
@@ -462,11 +724,14 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
         return;
     bool ours = false, resolve = false;
     int water = -1;
+    int trace = -1;
     for (uint32_t i = 0; i < count; ++i)
         if (subobjects[i].type == pipeline_subobject_type::pixel_shader && subobjects[i].data != nullptr)
         {
             const auto &shader = *static_cast<const shader_desc *>(subobjects[i].data);
-            ours |= is_game_shader(shader);
+            if (trace < 0)
+                trace = trace_variant_of(shader);
+            ours |= trace >= 0;
             resolve |= is_resolve_shader(shader);
             if (water < 0)
                 water = water_shader(shader);
@@ -495,6 +760,7 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
         s.desc = desc;
         s.resolve = resolve;
         s.water = water;
+        s.trace = trace;
         apply_to(s);
         s.game = pipe.handle;
         g_ready = true;
@@ -517,6 +783,7 @@ void on_destroy_pipeline(device *dev, pipeline pipe)
         std::lock_guard lock(g_lock);
         s.game = 0;
         s.active = 0;
+        s.active_alt = 0;
         for (uint64_t handle : s.made)
             dev->destroy_pipeline({handle});
         s.made.clear();
@@ -532,7 +799,15 @@ void on_bind_pipeline(command_list *cmd, pipeline_stage stages, pipeline pipe)
     for (const slot &s : g_slots)
         if (s.game.load(std::memory_order_acquire) == pipe.handle)
         {
-            const uint64_t active = s.active.load(std::memory_order_acquire);
+            // A full-size target needs no smooth upscale or softening: the game's own pipelines then. A
+            // three-quarter target takes the water copy made for its 4/3 texel. Any other size (or none read yet)
+            // keeps the game's water lighting: the copies only know these two texels.
+            const int live = ssr_res_live();
+            const uint64_t active = s.water >= 0 ? (live == 0   ? s.active.load(std::memory_order_acquire)
+                                                    : live == 1 ? s.active_alt.load(std::memory_order_acquire)
+                                                                : 0)
+                                    : s.resolve && live == 2 ? s.active_alt.load(std::memory_order_acquire)
+                                                             : s.active.load(std::memory_order_acquire);
             // Set on the D3D12 list directly: ReShade's bind_pipeline would also reset the primitive topology.
             if (active != 0)
                 if (auto *native = reinterpret_cast<ID3D12GraphicsCommandList *>(cmd->get_native()); native != nullptr)
@@ -598,20 +873,17 @@ const param_def SSR_DEFS[SSR_PARAMS] = {
     {"Intensity", "Intensity", "Brightness of screen-space reflections. The game uses 1.00. Above\n"
      "1 they can look too strong over the game's other reflections.",
      1, 0, 1.5f, "%.2f", false, false, true},
-    {"MotionFix", "Motion fix", "Stops reflections from lagging behind their objects when the camera turns.\n0 is the game's. "
-     "0.5 measured best. Past 0.75 they run ahead of their objects.",
-     0, 0, 1, "%.2f", false, false, false},
     {"NoiseTexels", "Noise spread", "How finely the ray start noise spreads over the pixels. 64 is the game's.\n"
      "128 makes the grain finer.",
      64, 64, 128, "%.0f", true, false, false},
-    {"Softening", "Softening", "Blends each reflection pixel with its neighbors. Hides the blocky look of the\n"
-     "game's half-resolution reflections at some sharpness. 0 is the game's.",
+    {"Softening", "Softening", "Blends each reflection pixel with its neighbors. Hides the blocky look of\n"
+     "reflections below full resolution at some sharpness. Not used at full resolution. 0 is the game's.",
      0, 0, 1, "%.2f", false, false, false},
     {"Refinement", "Hit refinement", "Extra depth checks to find the exact point a ray hits. 0 is the game's.\n"
      "Each one halves the error. Past 4 it is below a pixel.",
      0, 0, 4, "%.0f", true, false, false},
-    {"SmoothUpscale", "Smooth upscale", "Reads the half-resolution reflection with a smooth filter instead of the\n"
-     "game's plain one. Removes its 2-pixel steps. 0 is the game's.",
+    {"SmoothUpscale", "Smooth upscale", "Reads the reflection with a smooth filter instead of the game's plain one.\n"
+     "Removes its steps below full resolution. Not used at full resolution. 0 is the game's.",
      0, 0, 1, "%.2f", false, false, false},
     {"UpscaleFilter", "Upscale filter", "The smooth upscale's filter. 1 is soft (4 reads).\n"
      "2 is sharp (13 reads) with a little more detail. Bright reflections at night can show steps.",
@@ -619,6 +891,15 @@ const param_def SSR_DEFS[SSR_PARAMS] = {
     {"ReflectionAngle", "Reflection angle", "How steeply the camera can look down before reflections fade out.\n"
      "The game fades them from 25 to 35 degrees.",
      35, 35, 80, "%.0f deg", false, false, false},
+    {"Resolution", "Resolution", "Half is the game's. Three quarters traces reflections at 3/4 of the render size.\n"
+     "Full uses the game's own full-resolution path with its roughness blur. Each step costs more.",
+     0, 0, 2, "%.0f", true, false, false},
+    {"RoughnessBlur", "Roughness blur", "At full resolution the game blurs reflections by the water's roughness\n"
+     "and their distance. Lower is sharper. 0 is none. The game uses 1.00.",
+     1, 0, 1.5f, "%.2f", false, false, true},
+    {"SharpInMotion", "Sharp in motion", "Keeps reflections from trailing during camera motion. In motion each frame\n"
+     "shows only its own reflection. Off is the game's.",
+     0, 0, 1, "%.0f", true, false, false},
 };
 
 // The presets change only what was tested in game. Smoothing rises a little per preset. More steps give
@@ -626,16 +907,16 @@ const param_def SSR_DEFS[SSR_PARAMS] = {
 // from the game's 2.0 to 1.0. Below 1.0 a surface crossed between two steps can be missed. Jitter falls as
 // the steps rise. Edge reach rises in equal steps to 0.95, the game's value for the sides. Far thickness
 // falls to 0.005 at 4096 steps. There it finds far reflections instead of the plain fallback. Lower gave
-// noise in reflections of trees.
+// noise in reflections of trees. Sharp in motion keeps the history only at rest.
 const float SSR_PRESET_VALUES[PRESETS][SSR_PARAMS] = {
     {0.70f, 2, 1.6f, 128, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.0175f, 1.5f, 0.1f, 0.0125f, 0.70f, 0.95f, 20,
-     3.3333f, 0, 1, 0, 64, 0, 0, 0, 1, 35},
-    {0.73f, 1.6f, 1.6f, 512, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.013f, 1.25f, 0.1f, 0.0125f, 0.78f, 0.95f, 20,
-     3.3333f, 0, 1, 0.5f, 128, 0.17f, 2, 0.33f, 1, 43},
-    {0.77f, 1.3f, 1.6f, 1024, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.009f, 1.0f, 0.1f, 0.0125f, 0.87f, 0.95f, 20,
-     3.3333f, 0, 1, 0.5f, 128, 0.33f, 3, 0.67f, 1, 52},
-    {0.80f, 1, 1.6f, 4096, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.005f, 0.5f, 0.1f, 0.0125f, 0.95f, 0.95f, 20,
-     3.3333f, 0, 1, 0.5f, 128, 0.5f, 4, 1.0f, 1, 60},
+     3.3333f, 0, 1, 64, 0, 0, 0, 1, 35, 0, 1, 0},
+    {0.74f, 1.6f, 1.6f, 512, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.013f, 1.25f, 0.1f, 0.0125f, 0.78f, 0.95f, 20,
+     3.3333f, 0, 1, 128, 0.17f, 2, 0.33f, 1, 43, 1, 1, 1},
+    {0.78f, 1.3f, 1.6f, 1024, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.009f, 1.0f, 0.1f, 0.0125f, 0.87f, 0.95f, 20,
+     3.3333f, 0, 1, 128, 0.33f, 3, 0.67f, 1, 52, 1, 1, 1},
+    {0.82f, 1, 1.6f, 4096, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.005f, 0.5f, 0.1f, 0.0125f, 0.95f, 0.95f, 20,
+     3.3333f, 0, 1, 128, 0.5f, 4, 1.0f, 1, 60, 2, 1, 1},
 };
 
 void ssr_register()
@@ -647,6 +928,7 @@ void ssr_register()
 
 void ssr_unregister()
 {
+    ssr_res_restore();
     reshade::unregister_event<reshade::addon_event::bind_pipeline>(on_bind_pipeline);
     reshade::unregister_event<reshade::addon_event::destroy_pipeline>(on_destroy_pipeline);
     reshade::unregister_event<reshade::addon_event::init_pipeline>(on_init_pipeline);
@@ -664,6 +946,7 @@ void ssr_set(const float values[SSR_PARAMS])
             g_values[i] = v;
         }
         ssr_angle_set(g_values[SSR_ANGLE]);
+        ssr_res_set(int(g_values[SSR_RESOLUTION] + 0.5f));
         static bool first = true;
         if (same && !first)
             return;
@@ -675,4 +958,22 @@ void ssr_set(const float values[SSR_PARAMS])
 bool ssr_ready()
 {
     return g_ready.load();
+}
+
+const char *ssr_value_name(const param_def &def, float value)
+{
+    const int i = int(value + 0.5f);
+    if (&def == &SSR_DEFS[SSR_RESOLUTION])
+        return i >= 0 && i < 3 ? RESOLUTION_NAMES[i] : nullptr;
+    const bool on_off = &def == &SSR_DEFS[SSR_HISTORY_MOTION];
+    return on_off && i >= 0 && i < 2 ? SWITCH_NAMES[i] : nullptr;
+}
+
+// Smooth upscale and Softening only act below full resolution.
+const char *ssr_inactive_note(int param, const float values[SSR_PARAMS])
+{
+    const bool full = values[SSR_RESOLUTION] >= 1.5f;
+    if (full && (param == SSR_UPSCALE || param == SSR_SOFTEN))
+        return "Used below full resolution.";
+    return nullptr;
 }

@@ -24,5 +24,8 @@ bool lod_control_paused();
 bool lod_control_categories();
 // False while the grass grids can't be found, for example before the game world has loaded.
 bool lod_control_grass();
+// True while the guard holds detail below the settings: too much new detail was streaming in at once, for example
+// when the raven climbs fast or flies into a dense area.
+bool lod_control_guarded();
 // Gives the game its own values back. From DLL_PROCESS_DETACH.
 void lod_control_shutdown();

@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace
 {
@@ -52,6 +53,56 @@ void config_set(const char *section, const char *key, float value)
     char text[32];
     snprintf(text, sizeof(text), "%g", value);
     WritePrivateProfileStringW(wide(section).c_str(), wide(key).c_str(), wide(text).c_str(), g_path.c_str());
+}
+
+static std::string narrow_text(const wchar_t *text, size_t length)
+{
+    const int size = WideCharToMultiByte(CP_UTF8, 0, text, int(length), nullptr, 0, nullptr, nullptr);
+    std::string out(size_t(size > 0 ? size : 0), '\0');
+    if (size > 0)
+        WideCharToMultiByte(CP_UTF8, 0, text, int(length), out.data(), size, nullptr, nullptr);
+    return out;
+}
+
+bool config_section(const char *section, std::vector<std::pair<std::string, std::string>> &lines)
+{
+    lines.clear();
+    // The section names, to tell a missing section from an empty one.
+    std::vector<wchar_t> names(65536);
+    const DWORD got = GetPrivateProfileSectionNamesW(names.data(), DWORD(names.size()), g_path.c_str());
+    bool found = false;
+    for (const wchar_t *p = names.data(); p < names.data() + got && *p != 0; p += wcslen(p) + 1)
+        found |= _wcsicmp(p, wide(section).c_str()) == 0;
+    if (!found)
+        return false;
+    std::vector<wchar_t> text(65536);
+    const DWORD size = GetPrivateProfileSectionW(wide(section).c_str(), text.data(), DWORD(text.size()), g_path.c_str());
+    for (const wchar_t *p = text.data(); p < text.data() + size && *p != 0; p += wcslen(p) + 1)
+    {
+        if (*p == L';' || *p == L'#')
+            continue;
+        const wchar_t *eq = wcschr(p, L'=');
+        std::string key = narrow_text(p, eq != nullptr ? size_t(eq - p) : wcslen(p));
+        std::string value = eq != nullptr ? narrow_text(eq + 1, wcslen(eq + 1)) : std::string();
+        auto trim = [](std::string &s) {
+            s.erase(0, s.find_first_not_of(" \t"));
+            s.erase(s.find_last_not_of(" \t") + 1);
+        };
+        trim(key);
+        trim(value);
+        lines.emplace_back(key, value);
+    }
+    return true;
+}
+
+void config_remove_section(const char *section)
+{
+    WritePrivateProfileStringW(wide(section).c_str(), nullptr, nullptr, g_path.c_str());
+}
+
+void config_remove_key(const char *section, const char *key)
+{
+    WritePrivateProfileStringW(wide(section).c_str(), wide(key).c_str(), nullptr, g_path.c_str());
 }
 
 void config_set(const char *section, const char *key, int value)

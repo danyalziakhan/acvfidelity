@@ -21,14 +21,11 @@ enum ao_param
     AO_STEPS,
     AO_STRENGTH,
     AO_RADIUS,
-    AO_THIN,
     AO_FALLOFF_START,
     AO_FALLOFF_RANGE,
     AO_MIN_PIXELS,
     AO_MAX_PIXELS,
     AO_MAX_DISTANCE,
-    AO_THIN_WIDTH,
-    AO_THIN_TOLERANCE,
     AO_SPREAD,
     AO_MIN_OFFSET,
     AO_MIN_VISIBILITY,
@@ -44,19 +41,22 @@ enum ao_param
     AO_SKY,
     AO_CONTACT,
     AO_SKY_NIGHT,
+    // The AO shader again: the method (0 horizon-based, the game's; 1 visibility bitmask) and the bitmask thickness.
+    AO_METHOD,
+    AO_THICKNESS,
     AO_PARAMS
 };
 const int AO_LIGHT_FIRST = AO_BOUNCE;
 extern const param_def AO_DEFS[AO_PARAMS];
 extern const float AO_PRESET_VALUES[PRESETS][AO_PARAMS];
-// The window's order, in groups: look, light in shade, quality, shape of the shade. The settings shown only in
-// the debug build follow.
+// The window's order, in groups: look, light in shade, quality, shape of the shade. The settings not shown in the
+// window follow.
 const int AO_ORDER[AO_PARAMS] = {
-    AO_STRENGTH,     AO_RADIUS,      AO_BOUNCE,                                       // look
+    AO_STRENGTH,     AO_RADIUS,      AO_METHOD,        AO_THICKNESS,  AO_BOUNCE,      // look
     AO_SKY,          AO_SKY_NIGHT,   AO_SUN,           AO_BLEND,                      // light in shade
     AO_DIRECTIONS,   AO_STEPS,       AO_SPREAD,        AO_MAX_PIXELS, AO_MAX_DISTANCE, // quality
-    AO_FALLOFF_START, AO_THIN,       AO_THIN_COMPENSATION, AO_MIN_OFFSET, AO_MIN_VISIBILITY, // shape
-    AO_FALLOFF_RANGE, AO_MIN_PIXELS, AO_THIN_WIDTH,    AO_THIN_TOLERANCE, AO_BLUR_WIDTH, AO_BLUR_DEPTH,
+    AO_FALLOFF_START, AO_THIN_COMPENSATION, AO_MIN_OFFSET, AO_MIN_VISIBILITY, // shape
+    AO_FALLOFF_RANGE, AO_MIN_PIXELS, AO_BLUR_WIDTH, AO_BLUR_DEPTH,
     AO_BLUR_NORMAL,  AO_SUN_POWER,   AO_CONTACT};
 const int AO_DEFAULT_PRESET = 2; // Fidelity II
 
@@ -66,4 +66,9 @@ void ao_unregister();
 void ao_set(const float values[AO_PARAMS]);
 // True once the game created its AO shader.
 bool ao_ready();
+// The window's text for a setting's value (the method's names), or nullptr for the plain number.
+const char *ao_value_name(const param_def &def, float value);
+// For a setting the method doesn't use at these values (Bitmask thickness with horizon-based): the window greys it
+// out with this note. nullptr when it is in use.
+const char *ao_inactive_note(int param, const float values[AO_PARAMS]);
 

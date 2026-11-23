@@ -35,6 +35,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -98,128 +99,128 @@ void load_values(const char *section, const param_def *defs, const float *preset
 
 void save_value(const char *section, const param_def &def, float value);
 
-// An ini from 0.3.0 has no sample spread yet. If its AO matches a 0.3.0 preset, it gets the same preset of
-// this version. Strength stays as it was.
-void upgrade_ao()
+// A section of acvfidelity.ini that is not exactly this version's (an old section name, a key this version doesn't
+// know, a key it needs missing, a value that doesn't parse or is out of range) is set to the default preset,
+// Fidelity II, and written back clean. No partial migration of old values. One log line per section reset.
+struct ini_key
 {
-    if (std::isfinite(config_float("AmbientOcclusion", "SampleSpread", NAN)))
-        return;
-    // Directions, steps, radius, thin objects, max radius.
-    static const float OLD[PRESETS][5] = {
-        {2, 5, 2, 0, 128}, {3, 10, 2.5f, 0.0015f, 213}, {4, 20, 3, 0.003f, 299}, {5, 30, 3.5f, 0.0045f, 384}};
-    const int KEYS[5] = {AO_DIRECTIONS, AO_STEPS, AO_RADIUS, AO_THIN, AO_MAX_PIXELS};
-    for (int p = 0; p < PRESETS; ++p)
+    const char *key;
+    float min, max;
+    bool required; // written by every save (the window's values)
+};
+
+// Why a section is not this version's, or empty. *missing when the section isn't there at all.
+std::string section_problem(const char *section, const std::vector<ini_key> &keys, bool *missing)
+{
+    std::vector<std::pair<std::string, std::string>> lines;
+    *missing = !config_section(section, lines);
+    if (*missing)
+        return "";
+    for (const auto &[key, value] : lines)
     {
-        bool match = true;
-        for (int k = 0; k < 5; ++k)
-            match &= g_ao[KEYS[k]] == OLD[p][k];
-        if (!match)
-            continue;
-        const float strength = g_ao[AO_STRENGTH];
-        std::copy(AO_PRESET_VALUES[p], AO_PRESET_VALUES[p] + AO_PARAMS, g_ao);
-        g_ao[AO_STRENGTH] = strength;
-        for (int i = 0; i < AO_PARAMS; ++i)
-            if (!AO_DEFS[i].advanced)
-                save_value("AmbientOcclusion", AO_DEFS[i], g_ao[i]);
-        char text[96];
-        snprintf(text, sizeof(text), "Ambient occlusion: settings from 0.3.0 moved to this version's %s",
-                 PRESET_NAMES[p]);
-        dd_log(reshade::log::level::info, text);
-        return;
+        const ini_key *k = nullptr;
+        for (const ini_key &x : keys)
+            if (_stricmp(x.key, key.c_str()) == 0)
+                k = &x;
+        if (k == nullptr)
+            return "unknown key " + key;
+        char *end = nullptr;
+        const double v = strtod(value.c_str(), &end);
+        if (end == value.c_str() || *end != 0 || !std::isfinite(v) || v < k->min - 1e-4 || v > k->max + 1e-4)
+            return key + " = " + value + " is not valid";
     }
+    for (const ini_key &x : keys)
+    {
+        bool there = false;
+        for (const auto &line : lines)
+            there |= _stricmp(line.first.c_str(), x.key) == 0;
+        if (x.required && !there)
+            return std::string("missing key ") + x.key;
+    }
+    return "";
 }
 
-// An ini from 0.4.0 holds that version's presets. A section whose saved values match a 0.4.0 preset moves to the
-// same preset of this version. AO keeps its strength. Custom values stay as they are. Only keys the ini holds
-// are compared. Each section is checked once: the keys new in 0.5.0 are missing until then.
-void save_lod();
-
-// At least one key must be there. An empty section then never matches.
-bool matches_old(const char *section, const param_def *defs, const float *old, int count, int skip)
+// Checks a section; if it is missing or not this version's, writes the default preset's values. Old section
+// names are removed first. True when the section was written.
+bool check_section(const char *section, const std::vector<ini_key> &keys, std::initializer_list<const char *> old,
+                   const std::function<void()> &write_defaults)
 {
-    int found = 0;
-    for (int i = 0; i < count; ++i)
+    std::string reason;
+    for (const char *name : old)
     {
-        const float v = config_float(section, defs[i].key, NAN);
-        if (i == skip || !std::isfinite(v))
-            continue;
-        ++found;
-        if (std::fabs(v - old[i]) > 0.0005f * std::max(1.0f, std::fabs(old[i])))
-            return false;
-    }
-    return found > 0;
-}
-
-void upgrade_from_040()
-{
-    static const float AO_040[PRESETS][19] = {
-        {2, 5, 100, 2, 0, 0.5f, 1, 5, 128, 256, 0.25f, 0.1f, 1, 0, 0, 0, 1, 40, 4},
-        {3, 10, 100, 2, 0.0015f, 0.67f, 1, 5, 213, 256, 0.25f, 0.1f, 2, 1.3f, 0.03f, 2, 1, 40, 4},
-        {4, 20, 100, 2, 0.003f, 0.83f, 1, 5, 299, 256, 0.25f, 0.1f, 2, 1.3f, 0.03f, 2, 1, 40, 4},
-        {5, 30, 100, 2, 0.0045f, 1.0f, 1, 5, 384, 256, 0.25f, 0.1f, 2, 1.3f, 0.03f, 2, 1, 40, 4}};
-    static const float SSR_040[PRESETS][18] = {
-        {0.70f, 2, 1.6f, 128, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.0175f, 1.5f, 0.1f, 0.0125f, 0.70f, 0.95f, 20, 3.3333f, 0, 1},
-        {0.73f, 1.6f, 1.6f, 512, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.013f, 1.25f, 0.1f, 0.0125f, 0.78f, 0.95f, 20, 3.3333f, 0, 1},
-        {0.76f, 1.3f, 1.6f, 1024, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.009f, 1.0f, 0.1f, 0.0125f, 0.87f, 0.95f, 20, 3.3333f, 0, 1},
-        {0.79f, 1, 1.6f, 4096, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.005f, 0.5f, 0.1f, 0.0125f, 0.95f, 0.95f, 20, 3.3333f, 0, 1}};
-    static const float LOD_040[PRESETS][LOD_VALUES] = {
-        {1.0f, 1.0f, 1.0f, 1.0f, 1.0f}, {1.5f, 1.25f, 2.0f, 1.25f, 1.67f}, {2.0f, 1.5f, 3.0f, 1.5f, 2.33f},
-        {2.5f, 2.0f, 4.0f, 2.0f, 3.0f}};
-
-    if (!std::isfinite(config_float("AmbientOcclusion", "SunlightOcclusion", NAN)))
-    {
-        for (int p = 0; p < PRESETS; ++p)
-            if (matches_old("AmbientOcclusion", AO_DEFS, AO_040[p], 19, AO_STRENGTH))
-            {
-                const float strength = g_ao[AO_STRENGTH];
-                std::copy(AO_PRESET_VALUES[p], AO_PRESET_VALUES[p] + AO_PARAMS, g_ao);
-                g_ao[AO_STRENGTH] = strength;
-                break;
-            }
-        for (int i = 0; i < AO_PARAMS; ++i)
-            if (!AO_DEFS[i].advanced)
-                save_value("AmbientOcclusion", AO_DEFS[i], g_ao[i]);
-    }
-    if (!std::isfinite(config_float("ScreenSpaceReflections", "SmoothUpscale", NAN)))
-    {
-        for (int p = 0; p < PRESETS; ++p)
-            if (matches_old("ScreenSpaceReflections", SSR_DEFS, SSR_040[p], 18, -1))
-            {
-                std::copy(SSR_PRESET_VALUES[p], SSR_PRESET_VALUES[p] + SSR_PARAMS, g_ssr);
-                break;
-            }
-        for (int i = 0; i < SSR_PARAMS; ++i)
-            if (!SSR_DEFS[i].advanced)
-                save_value("ScreenSpaceReflections", SSR_DEFS[i], g_ssr[i]);
-    }
-    if (!std::isfinite(config_float("LevelOfDetail", "ModelFade", NAN)))
-    {
-        for (int p = 0; p < PRESETS; ++p)
+        std::vector<std::pair<std::string, std::string>> lines;
+        if (config_section(name, lines))
         {
-            bool match = true;
-            int found = 0;
-            for (int i = 0; i < LOD_VALUES; ++i)
-            {
-                const float v = config_float("LevelOfDetail", LOD_KEYS[i], NAN);
-                found += std::isfinite(v);
-                match &= !std::isfinite(v) || std::fabs(v - LOD_040[p][i]) < 0.006f;
-            }
-            if (match && found > 0)
-            {
-                std::copy(LOD_PRESETS[p], LOD_PRESETS[p] + LOD_VALUES, g_lod);
-                g_lod_fade = FADE_PRESETS[p];
-                break;
-            }
+            config_remove_section(name);
+            reason = std::string("old section [") + name + "]";
         }
-        save_lod();
     }
+    bool missing = false;
+    const std::string problem = section_problem(section, keys, &missing);
+    if (reason.empty())
+        reason = problem;
+    if (!missing && problem.empty() && reason.empty())
+        return false;
+    config_remove_section(section);
+    write_defaults();
+    if (!reason.empty())
+    {
+        char text[256];
+        snprintf(text, sizeof(text), "acvfidelity.ini: [%s] set to Fidelity II (%s)", section, reason.c_str());
+        dd_log(reshade::log::level::warning, text);
+    }
+    return true;
 }
+
+std::vector<ini_key> keys_of(const param_def *defs, int count)
+{
+    std::vector<ini_key> keys;
+    // Only the window's settings. A key the window doesn't show (one from an older version) is not this version's.
+    for (int i = 0; i < count; ++i)
+        if (!defs[i].advanced)
+            keys.push_back({defs[i].key, defs[i].min, defs[i].max, true});
+    return keys;
+}
+
+// The default preset's values of a tuning section, as a save writes them.
+void write_preset(const char *section, const param_def *defs, const float *presets, int count, int preset)
+{
+    for (int i = 0; i < count; ++i)
+        if (!defs[i].advanced)
+            save_value(section, defs[i], presets[preset * count + i]);
+}
+
+void save_lod();
 
 float grass_for(float clutter);
 
 void load_settings()
 {
     config_open();
+    {
+        std::vector<ini_key> keys;
+        for (int i = 0; i < LOD_VALUES; ++i)
+        {
+            const float max = i == 0                 ? MAX_DISTANCE
+                              : i == 1 + LOD_CLUTTER ? MAX_CLUTTER
+                              : i == LOD_GRASS       ? MAX_GRASS
+                                                     : MAX_CATEGORY;
+            // Grass follows clutter in the release window; a save writes it all the same.
+            keys.push_back({LOD_KEYS[i], 1.0f, max, i != LOD_GRASS});
+        }
+        keys.push_back({"ModelFade", MIN_FADE, MAX_FADE, true});
+        check_section("LevelOfDetail", keys, {}, [] {
+            std::copy(LOD_PRESETS[2], LOD_PRESETS[2] + LOD_VALUES, g_lod);
+            g_lod_fade = FADE_PRESETS[2];
+            save_lod();
+        });
+    }
+    check_section("AmbientOcclusion", keys_of(AO_DEFS, AO_PARAMS), {}, [] {
+        write_preset("AmbientOcclusion", AO_DEFS, &AO_PRESET_VALUES[0][0], AO_PARAMS, AO_DEFAULT_PRESET);
+    });
+    check_section("ScreenSpaceReflectionsWater", keys_of(SSR_DEFS, SSR_PARAMS), {"ScreenSpaceReflections"}, [] {
+        write_preset("ScreenSpaceReflectionsWater", SSR_DEFS, &SSR_PRESET_VALUES[0][0], SSR_PARAMS, SSR_DEFAULT_PRESET);
+    });
     for (int i = 0; i < LOD_VALUES; ++i)
     {
         const float v = config_float("LevelOfDetail", LOD_KEYS[i], LOD_PRESETS[2][i]);
@@ -236,9 +237,7 @@ void load_settings()
         g_lod_fade = std::isfinite(v) ? std::clamp(v, MIN_FADE, MAX_FADE) : FADE_PRESETS[2];
     }
     load_values("AmbientOcclusion", AO_DEFS, &AO_PRESET_VALUES[0][0], AO_PARAMS, AO_DEFAULT_PRESET, g_ao);
-    upgrade_ao();
-    load_values("ScreenSpaceReflections", SSR_DEFS, &SSR_PRESET_VALUES[0][0], SSR_PARAMS, SSR_DEFAULT_PRESET, g_ssr);
-    upgrade_from_040();
+    load_values("ScreenSpaceReflectionsWater", SSR_DEFS, &SSR_PRESET_VALUES[0][0], SSR_PARAMS, SSR_DEFAULT_PRESET, g_ssr);
 }
 
 
@@ -397,11 +396,6 @@ bool tuning_section(const char *title, const char *section, const param_def *def
                     int count, float *values, const int *order = nullptr)
 {
     ImGui::SeparatorText(title);
-    if (strcmp(section, "ScreenSpaceReflections") == 0)
-    {
-        ImGui::TextDisabled("Water and other flat shiny surfaces.");
-        ImGui::Spacing();
-    }
     ImGui::PushID(title);
     bool changed = false;
     auto save_all = [&] {
@@ -429,10 +423,18 @@ bool tuning_section(const char *title, const char *section, const param_def *def
 
     auto slider = [&](int i) {
         const param_def &def = defs[i];
+        // A setting the chosen method doesn't use stays in place, greyed out.
+        const char *inactive = defs == AO_DEFS    ? ao_inactive_note(i, values)
+                               : defs == SSR_DEFS ? ssr_inactive_note(i, values)
+                                                  : nullptr;
+        ImGui::BeginDisabled(inactive != nullptr);
         ImGuiSliderFlags flags = ImGuiSliderFlags_AlwaysClamp;
         if (def.logarithmic)
             flags |= ImGuiSliderFlags_Logarithmic;
-        ImGui::SliderFloat(def.label, &values[i], def.min, def.max, def.format, flags);
+        const char *name = ssr_value_name(def, values[i]);
+        if (name == nullptr)
+            name = ao_value_name(def, values[i]);
+        ImGui::SliderFloat(def.label, &values[i], def.min, def.max, name != nullptr ? name : def.format, flags);
         if (def.integer)
             values[i] = std::round(values[i]);
         if (ImGui::IsItemDeactivatedAfterEdit())
@@ -450,7 +452,10 @@ bool tuning_section(const char *title, const char *section, const param_def *def
             snprintf(text, sizeof(text), "%s: %s set to %g", title, def.label, values[i]);
             dd_log(reshade::log::level::info, text);
         }
-        if (def.tooltip != nullptr && ImGui::IsItemHovered())
+        ImGui::EndDisabled();
+        if (inactive != nullptr && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", inactive);
+        else if (def.tooltip != nullptr && ImGui::IsItemHovered())
             ImGui::SetTooltip("%s", def.tooltip);
     };
     // The window's order, if it differs from the order of the definitions.
@@ -473,10 +478,11 @@ void ao_section()
 
 void ssr_section()
 {
-    if (tuning_section("Screen-space reflections", "ScreenSpaceReflections", SSR_DEFS, &SSR_PRESET_VALUES[0][0], SSR_PARAMS,
-                       g_ssr, SSR_ORDER))
+    if (tuning_section("Screen-space reflections (Water)", "ScreenSpaceReflectionsWater", SSR_DEFS,
+                       &SSR_PRESET_VALUES[0][0], SSR_PARAMS, g_ssr, SSR_ORDER))
         ssr_set(g_ssr);
 }
+
 
 
 // The status lines above the settings. At most one line each for level of detail, ambient occlusion and
@@ -501,6 +507,8 @@ void draw_status()
         line(false, "Loading: the game's own detail for a moment.");
     else if (lod_control_categories() && !lod_control_grass())
         line(false, "Grass distance: waiting for the game world.");
+    else if (lod_control_guarded())
+        line(false, "Level of detail: eased while a lot of new detail streams in.");
     if (!ao_ready())
         line(true, "Ambient occlusion not active yet: the game's AO shader was not seen.");
     if (!ssr_ready())

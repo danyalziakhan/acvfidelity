@@ -36,6 +36,31 @@ const float GRASS_RISE = 0.3125f;
 // Fields of the game's LOD object (see lod_hook.h).
 const unsigned SECOND_DISTANCE = 0x74D4;
 const unsigned CAMERA_SPEED = 0x74DC;
+const unsigned CAMERA_HEIGHT = 0x88;
+// The game's own draw distance for one class of objects. It grows while the game narrows the camera's view for a
+// fast raven flight.
+const unsigned MOTION_DISTANCE = 0x1864;
+
+// The guard. Raised detail is safe at rest, but too much new detail at once can make the GPU fault: plants blink,
+// geometry breaks and then the game crashes. That happens when the raven climbs fast or flies into a dense area.
+// The guard watches how fast new objects are added, the camera's climb and the game's own motion distance. It eases
+// every value toward the game's own while one of them is high, then brings them back slowly.
+// New objects a second in the game's instance pool at which the guard counts as full. Fast flights at the game's
+// own detail stayed under 8000. The GPU faults came after 25000 to 43000.
+const double GROWTH_LIMIT = 15000.0;
+// The camera's climb at which the guard counts as full, in meters a second. A raven boosting up climbs at 7 to 17.
+const double CLIMB_LIMIT = 7.0;
+// The game's motion distance above its resting value at which the guard counts as full. It reaches 31%.
+const double MOTION_LIMIT = 0.1;
+// Ease down at this share of a limit. Climb back after it stayed below the lower share for HOLD_LOW seconds.
+const float GUARD_HIGH = 0.85f, GUARD_LOW = 0.75f;
+const double HOLD_LOW = 10.0;
+// Easing down, in distance multiplier a second.
+const float GUARD_EASE = 1.0f;
+// Climbing back: the other values over this many seconds, then grass over as many again.
+const float GUARD_RESTORE = 40.0f;
+const double GUARD_SAMPLE = 0.25;
+const float NO_CEILING = 1000.0f;
 
 float g_target_distance = 1.0f;
 float g_target[LOD_CATEGORIES] = {1.0f, 1.0f, 1.0f};
@@ -53,6 +78,35 @@ double g_hold_until = 0.0;
 double g_last = 0.0;
 // When the applied values started moving toward new targets, or 0 while they match them.
 double g_rise_started = 0.0;
+
+// The guard's state. The ceilings are the most each value may be now: detail, the three categories, grass.
+const int GUARDED = 2 + LOD_CATEGORIES;
+float g_ceiling[GUARDED] = {NO_CEILING, NO_CEILING, NO_CEILING, NO_CEILING, NO_CEILING};
+enum class guard_mode
+{
+    quiet,
+    hold,
+    easing,
+    climbing,
+};
+guard_mode g_guard = guard_mode::quiet;
+guard_mode g_guard_logged = guard_mode::quiet;
+double g_guard_next = 0.0, g_guard_log = 0.0, g_low_since = -1.0;
+float g_reads[4] = {};
+int g_read_count = 0, g_read_at = 0;
+float g_ratio = 0.0f;
+// The last second of samples for growth and climb.
+struct guard_sample
+{
+    double t;
+    double instances; // 0 when the pool could not be read
+    float height;
+    bool height_ok;
+};
+guard_sample g_samples[8] = {};
+int g_sample_count = 0, g_sample_at = 0;
+double g_growth = 0.0, g_climb = 0.0, g_motion = 0.0;
+float g_motion_rest = 0.0f;
 
 double now_seconds()
 {
@@ -79,6 +133,193 @@ const char *load_sign(double frame, float speed)
     if (g_hooked && speed > CAMERA_JUMP)
         return "a camera jump";
     return nullptr;
+}
+
+template <typename T> bool read(uintptr_t address, T &value)
+{
+    SIZE_T got = 0;
+    return address > 0x10000 &&
+           ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void *>(address), &value, sizeof(T), &got) &&
+           got == sizeof(T);
+}
+
+// Instances in use in the game's instance pool (Steam build 26142239). The path from the LOD object: world =
+// [[[object + 0x7240] + 0x248]], scene = [world + 0x17a0], owner = [[scene + 0x5a8] + 0x10], pool at owner + 0x1350
+// with its capacity at +0xe0 and free slots at +0xe8. The scene and its wrapper are checked by their vtables.
+bool instances_in_use(uintptr_t object, double &used)
+{
+    const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    uintptr_t s = 0, handle = 0, world = 0, scene = 0, wrapper = 0, owner = 0, vt = 0;
+    uint32_t flags = 0, capacity = 0, free = 0;
+    if (object == 0 || !read(object + 0x7240, s) || !read(s + 0x248, handle) || !read(handle + 8, flags) ||
+        (flags & 0x80000000u) == 0 || !read(handle, world))
+        return false;
+    if (!read(world + 0x17a0, scene) || !read(scene, vt) || vt != base + 0x456ed58)
+        return false;
+    if (!read(scene + 0x5a8, wrapper) || !read(wrapper, vt) || vt != base + 0x4580820)
+        return false;
+    if (!read(wrapper + 0x10, owner) || owner == 0 || !read(owner + 0x1350 + 0xe0, capacity) ||
+        !read(owner + 0x1350 + 0xe8, free) || free > capacity || capacity == free)
+        return false;
+    used = double(capacity - free);
+    return true;
+}
+
+// One read of the three signals. The largest share of its limit counts. Negative when none could be read.
+float guard_sample_now(double now)
+{
+    const uintptr_t object = lod_hook_object();
+    guard_sample s = {now, 0.0, 0.0f, false};
+    if (!instances_in_use(object, s.instances))
+        s.instances = 0.0;
+    s.height_ok = lod_hook_read(CAMERA_HEIGHT, s.height) && std::isfinite(s.height);
+    g_samples[g_sample_at] = s;
+    g_sample_at = (g_sample_at + 1) % 8;
+    g_sample_count = std::min(g_sample_count + 1, 8);
+    float r = -1.0f;
+    // Growth and climb over at least a second.
+    for (int i = 1; i < g_sample_count; ++i)
+    {
+        const guard_sample &p = g_samples[(g_sample_at - 1 - i + 16) % 8];
+        if (now - p.t < 1.0)
+            continue;
+        if (s.instances > 0.0 && p.instances > 0.0)
+        {
+            g_growth = (s.instances - p.instances) / (now - p.t);
+            r = std::max(r, float(std::max(g_growth, 0.0) / GROWTH_LIMIT));
+        }
+        if (s.height_ok && p.height_ok)
+        {
+            const double climb = (s.height - p.height) / (now - p.t);
+            // Faster than this is the raven called back or a jump, not a climb.
+            if (std::fabs(climb) < 300.0)
+            {
+                g_climb = climb;
+                r = std::max(r, float(std::max(climb, 0.0) / CLIMB_LIMIT));
+            }
+        }
+        break;
+    }
+    float motion = 0.0f;
+    if (lod_hook_read(MOTION_DISTANCE, motion) && std::isfinite(motion) && motion > 0.0f && motion < 1e6f)
+    {
+        // The resting value is the lowest seen. It follows a lasting change slowly (over about 30 s), for example a
+        // new field of view in the game's options.
+        if (g_motion_rest <= 0.0f || motion < g_motion_rest)
+            g_motion_rest = motion;
+        else
+            g_motion_rest += (motion - g_motion_rest) * float(GUARD_SAMPLE / 30.0);
+        g_motion = motion / g_motion_rest - 1.0;
+        r = std::max(r, float(g_motion / MOTION_LIMIT));
+    }
+    return r;
+}
+
+const char *guard_name(guard_mode m)
+{
+    switch (m)
+    {
+    case guard_mode::quiet: return "quiet";
+    case guard_mode::hold: return "holding";
+    case guard_mode::easing: return "easing detail toward the game's own";
+    case guard_mode::climbing: return "bringing detail back";
+    }
+    return "?";
+}
+
+// Once a frame. The targets are the settings, the applied values what the game has now.
+void guard_frame(double now, double frame, const float applied[GUARDED], const float target[GUARDED])
+{
+    if (!g_hooked)
+        return;
+    const float dt = float(std::min(frame, 0.1));
+    if (now >= g_guard_next)
+    {
+        g_guard_next = now + GUARD_SAMPLE;
+        const float v = guard_sample_now(now);
+        if (v >= 0.0f)
+        {
+            g_reads[g_read_at] = v;
+            g_read_at = (g_read_at + 1) % 4;
+            g_read_count = std::min(g_read_count + 1, 4);
+            float sorted[4];
+            std::copy(g_reads, g_reads + g_read_count, sorted);
+            std::sort(sorted, sorted + g_read_count);
+            g_ratio = g_read_count % 2 == 1 ? sorted[g_read_count / 2]
+                                            : 0.5f * (sorted[g_read_count / 2 - 1] + sorted[g_read_count / 2]);
+            // A read at or above a limit counts at once.
+            if (v >= 1.0f)
+                g_ratio = std::max(g_ratio, v);
+        }
+    }
+    bool limited = false;
+    for (int k = 0; k < GUARDED; ++k)
+        limited |= g_ceiling[k] < NO_CEILING;
+    guard_mode next;
+    if (g_read_count == 0)
+        next = guard_mode::hold;
+    else if (g_ratio >= GUARD_HIGH)
+        next = guard_mode::easing;
+    else if (g_ratio >= GUARD_LOW)
+        next = guard_mode::hold;
+    else
+        next = g_guard == guard_mode::climbing ? guard_mode::climbing : guard_mode::quiet;
+    if (next != guard_mode::quiet && next != guard_mode::climbing)
+        g_low_since = -1.0;
+    else if (g_low_since < 0.0)
+        g_low_since = now;
+    if (next == guard_mode::quiet && limited && now - g_low_since >= HOLD_LOW)
+        next = guard_mode::climbing;
+    if (next == guard_mode::hold && !limited)
+        next = guard_mode::quiet;
+    g_guard = next;
+
+    if (g_guard == guard_mode::easing)
+    {
+        // From what the game has now, down toward the game's own values.
+        for (int k = 0; k < GUARDED; ++k)
+            g_ceiling[k] = std::max(1.0f, std::min(g_ceiling[k], std::max(applied[k], 1.0f)) - GUARD_EASE * dt);
+    }
+    else if (g_guard == guard_mode::climbing)
+    {
+        // Detail and the categories first, grass last: grass adds the most new objects.
+        bool others = false;
+        for (int k = 0; k < GUARDED - 1; ++k)
+            if (g_ceiling[k] < NO_CEILING)
+            {
+                others = true;
+                g_ceiling[k] += std::max(target[k] - 1.0f, 0.05f) / GUARD_RESTORE * dt;
+                if (g_ceiling[k] >= target[k])
+                    g_ceiling[k] = NO_CEILING;
+            }
+        const int grass = GUARDED - 1;
+        if (!others && g_ceiling[grass] < NO_CEILING)
+        {
+            g_ceiling[grass] += std::max(target[grass] - 1.0f, 0.05f) / GUARD_RESTORE * dt;
+            if (g_ceiling[grass] >= target[grass])
+                g_ceiling[grass] = NO_CEILING;
+        }
+        bool still = false;
+        for (int k = 0; k < GUARDED; ++k)
+            still |= g_ceiling[k] < NO_CEILING;
+        if (!still)
+            g_guard = guard_mode::quiet;
+    }
+    // One log line per change, and every 2 s while the values move.
+    const bool moving = g_guard == guard_mode::easing || g_guard == guard_mode::climbing;
+    if (g_guard != g_guard_logged || (moving && now >= g_guard_log))
+    {
+        char text[256];
+        snprintf(text, sizeof(text),
+                 "LOD guard: %s (new objects %.0f a second, climb %.1f m/s, motion %.0f%%); detail at most %.2fx, "
+                 "grass at most %.2fx",
+                 guard_name(g_guard), std::max(g_growth, 0.0), g_climb, g_motion * 100.0,
+                 std::min(g_ceiling[0], target[0]), std::min(g_ceiling[GUARDED - 1], target[GUARDED - 1]));
+        if (g_guard != g_guard_logged || g_guard != guard_mode::quiet)
+            dd_log(reshade::log::level::info, text);
+        g_guard_logged = g_guard;
+        g_guard_log = now + 2.0;
+    }
 }
 } // namespace
 
@@ -150,6 +391,11 @@ void lod_control_frame()
                                                          "values held as they are"
                                                        : "LOD: the game's own detail resumed");
     }
+    {
+        const float applied[GUARDED] = {g_distance, g_applied[0], g_applied[1], g_applied[2], g_grass};
+        const float target[GUARDED] = {g_target_distance, g_target[0], g_target[1], g_target[2], g_target_grass};
+        guard_frame(now, frame, applied, target);
+    }
     // Held as they are while the game pauses its detail outside a load. They are still written below.
     bool update = !g_frozen || g_paused;
     if (update)
@@ -163,21 +409,27 @@ void update_values(double now, double frame)
 {
     const bool low = g_paused;
     const float step = RISE * float(std::min(frame, 0.1));
-    g_distance = approach(g_distance, low ? 1.0f : g_target_distance, step);
+    // The settings, capped by the guard's ceilings. The ceilings move gradually, so the values follow gradually.
+    const float target_distance = std::max(1.0f, std::min(g_target_distance, g_ceiling[0]));
+    float target[LOD_CATEGORIES];
     for (int k = 0; k < LOD_CATEGORIES; ++k)
-        g_applied[k] = approach(g_applied[k], low ? 1.0f : g_target[k], step);
+        target[k] = std::max(1.0f, std::min(g_target[k], g_ceiling[1 + k]));
+    const float target_grass = std::max(1.0f, std::min(g_target_grass, g_ceiling[GUARDED - 1]));
+    g_distance = approach(g_distance, low ? 1.0f : target_distance, step);
+    for (int k = 0; k < LOD_CATEGORIES; ++k)
+        g_applied[k] = approach(g_applied[k], low ? 1.0f : target[k], step);
 
-    bool others = std::fabs(g_distance - g_target_distance) < 0.001f;
+    bool others = std::fabs(g_distance - target_distance) < 0.001f;
     for (int k = 0; k < LOD_CATEGORIES; ++k)
-        others &= std::fabs(g_applied[k] - g_target[k]) < 0.001f;
+        others &= std::fabs(g_applied[k] - target[k]) < 0.001f;
     // Grass drops at once and climbs only after the rest.
-    if (low || g_target_grass <= g_grass)
-        g_grass = low ? 1.0f : g_target_grass;
+    if (low || target_grass <= g_grass)
+        g_grass = low ? 1.0f : target_grass;
     else if (others)
-        g_grass = approach(g_grass, g_target_grass, GRASS_RISE * float(std::min(frame, 0.1)));
+        g_grass = approach(g_grass, target_grass, GRASS_RISE * float(std::min(frame, 0.1)));
 
     // One log line per climb: when the applied values reach the settings and how long it took.
-    const bool reached = others && std::fabs(g_grass - g_target_grass) < 0.001f;
+    const bool reached = others && std::fabs(g_grass - target_grass) < 0.001f;
     if (low || reached)
     {
         if (!low && g_rise_started != 0.0)
@@ -236,6 +488,14 @@ bool lod_control_categories()
 bool lod_control_grass()
 {
     return g_grass_found;
+}
+
+bool lod_control_guarded()
+{
+    for (int k = 0; k < GUARDED; ++k)
+        if (g_ceiling[k] < NO_CEILING)
+            return true;
+    return false;
 }
 
 void lod_control_shutdown()

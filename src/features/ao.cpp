@@ -34,6 +34,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <mutex>
@@ -67,29 +68,6 @@ const size_t AT_PATTERN = 0x8ac;     // float pi / 16
 // mov r7.yzw, l(0, -1000, -1000, 0): each direction starts its two horizons here.
 const size_t AT_DIRECTION_START = 0xa40;
 const uint32_t DIRECTION_START[8] = {0x08000036, 0x001000E2, 7, 0x00004002, 0, 0xC47A0000, 0xC47A0000, 0};
-// The horizon update of each side: max r7.y, r4.w, r7.y and max r7.z, r4.w, r7.z. A sample can only raise
-// the horizon. So every object counts as infinitely thick. Thin grass stems and poles shade like walls.
-// The thickness heuristic of the GTAO paper (Jimenez et al. 2016) lets the horizon sink toward a lower sample
-// by a share. A thin occluder's shade then fades behind it. A solid wall still keeps the horizon up.
-//   mul r9.w, r7.y, l(1 - share)
-//   mad r9.w, r4.w, l(share), r9.w
-//   max r7.y, r4.w, r9.w
-// r9.w is unused in the game's shader. The share applies at every step. So it adds up: (1 - share)^steps of
-// a thin occluder's shade is left. Share 0 is the game's own.
-// That alone also let shade fade behind pots, crates and rocks. The sink can't tell how wide an object was.
-// So each side counts how many steps in a row stayed on the object that holds its horizon. The counts are
-// r10.x and r10.z, reset per direction. A sample counts while it is within a tolerance of the horizon. Bumps
-// on a surface then don't end the count. A sample that jumps far above the horizon in one step is a new and
-// nearer object. Its count starts again at 1. A pole right after open ground then counts as narrow. The jump
-// has to be large. A wall seen from its base rises a little at every step and must keep counting. Each side
-// keeps that count for the horizon it holds in r10.y and r10.w. The horizon sinks only when that object was
-// narrow. A grass stem lasts a step or two, a pot many.
-struct horizon_site
-{
-    size_t at;
-    uint32_t horizon_dest, horizon_src; // r7.y or r7.z
-};
-const horizon_site HORIZONS[2] = {{0xe34, 0x00100022, 0x0010001A}, {0x1110, 0x00100042, 0x0010002A}};
 // mul r0.z, r0.z, CB1[0][2].x (nine tokens) becomes
 // mul r0.z, r0.z, l(power), nop, nop.
 const size_t AT_POWER = 0x19e4;
@@ -271,6 +249,9 @@ void update_checksum(std::vector<uint8_t> &code)
 
 bool all_game_values(const float *v, int from, int to)
 {
+    // The whole AO shader range: the bitmask needs a copy even at the game's other values.
+    if (from == 0 && to == AO_BLUR_WIDTH && v[AO_METHOD] != 0.0f)
+        return false;
     for (int i = from; i < to; ++i)
         if (v[i] != AO_DEFS[i].game)
             return false;
@@ -315,8 +296,208 @@ bool make_blur_copy(std::vector<uint8_t> &code, const blur_desc &blur, const flo
     return true;
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Visibility bitmask AO. The per-side horizon max becomes one 32-sector mask per slice (Therrien et al. 2023,
+// "Screen Space Indirect Lighting with Visibility Bitmask").
+// Each sample marks the sectors between its front angle and its back angle: the sample pushed back by the
+// thickness along the view direction. Sectors follow the game's own cosine integral (gtao weighting), so a solid
+// occluder gives exactly the game's GTAO. Both ends of a range round to the nearest sector boundary.
+// Every object counts as deep as Bitmask thickness. Light passes behind thinner things such as grass blades.
+// The tables are generated from the lab's bitmask generator. The copies here are byte-identical to its builds.
+// Value slots are written with lit(), which rounds through "%.9g" like the lab's assembler.
+// ---------------------------------------------------------------------------------------------------------------
+// Slice start, gtao weighting: the normal projection and the mapping terms.
+const uint32_t BM_SETUP[333] = {
+    0x05000036, 0x00100012, 0x00000004, 0x00004001, 0x00000000, 0x05000036, 0x00100042, 0x00000004, 0x0010000a, 0x00000007,
+    0x05000036, 0x00100022, 0x00000004, 0x0010000a, 0x00000008, 0x07000038, 0x00100072, 0x00000009, 0x00100496, 0x00000003,
+    0x00100246, 0x00000004, 0x0a000032, 0x00100072, 0x00000009, 0x00100926, 0x00000004, 0x00100926, 0x00000003, 0x80100246,
+    0x00000041, 0x00000009, 0x07000010, 0x00100022, 0x00000005, 0x00100246, 0x00000009, 0x00100246, 0x00000009, 0x05000044,
+    0x00100022, 0x00000005, 0x0010001a, 0x00000005, 0x07000038, 0x00100072, 0x00000009, 0x00100556, 0x00000005, 0x00100246,
+    0x00000009, 0x07000010, 0x00100022, 0x00000005, 0x00100246, 0x00000001, 0x00100246, 0x00000009, 0x0a000032, 0x00100072,
+    0x00000009, 0x80100246, 0x00000041, 0x00000009, 0x00100556, 0x00000005, 0x00100246, 0x00000001, 0x07000010, 0x00100022,
+    0x00000005, 0x00100246, 0x00000009, 0x00100246, 0x00000009, 0x0500004b, 0x00100012, 0x00000006, 0x0010001a, 0x00000005,
+    0x05000044, 0x00100022, 0x00000005, 0x0010001a, 0x00000005, 0x07000038, 0x00100072, 0x00000009, 0x00100556, 0x00000005,
+    0x00100246, 0x00000009, 0x07000010, 0x00100022, 0x00000005, 0x00100246, 0x00000009, 0x00100246, 0x00000003, 0x07000034,
+    0x00100022, 0x00000006, 0x0010001a, 0x00000005, 0x00004001, 0xbf800000, 0x07000033, 0x00100022, 0x00000006, 0x0010001a,
+    0x00000006, 0x00004001, 0x3f800000, 0x0a000032, 0x00100012, 0x00000007, 0x8010001a, 0x00000081, 0x00000006, 0x00004001,
+    0xbe2c9f73, 0x00004001, 0x3fc89afe, 0x08000000, 0x00100022, 0x00000006, 0x8010001a, 0x000000c1, 0x00000006, 0x00004001,
+    0x3f800000, 0x0500004b, 0x00100022, 0x00000006, 0x0010001a, 0x00000006, 0x07000031, 0x00100082, 0x00000007, 0x00004001,
+    0x00000000, 0x0010001a, 0x00000005, 0x07000031, 0x00100022, 0x00000005, 0x0010001a, 0x00000005, 0x00004001, 0x00000000,
+    0x0800001e, 0x00100022, 0x00000005, 0x8010003a, 0x00000041, 0x00000007, 0x0010001a, 0x00000005, 0x0500002b, 0x00100022,
+    0x00000005, 0x0010001a, 0x00000005, 0x09000032, 0x00100022, 0x00000006, 0x0010000a, 0x00000007, 0x0010001a, 0x00000006,
+    0x00004001, 0xbfc90fd8, 0x09000032, 0x00100022, 0x00000005, 0x0010001a, 0x00000005, 0x0010001a, 0x00000006, 0x00004001,
+    0x3fc90fd8, 0x0700000f, 0x00100082, 0x00000004, 0x00100046, 0x00000009, 0x00100596, 0x00000004, 0x07000031, 0x00100082,
+    0x00000007, 0x00004001, 0x00000000, 0x0010003a, 0x00000004, 0x07000031, 0x00100082, 0x00000004, 0x0010003a, 0x00000004,
+    0x00004001, 0x00000000, 0x0800001e, 0x00100082, 0x00000004, 0x8010003a, 0x00000041, 0x00000007, 0x0010003a, 0x00000004,
+    0x0500002b, 0x00100082, 0x00000004, 0x0010003a, 0x00000004, 0x08000038, 0x00100042, 0x00000004, 0x0010003a, 0x00000004,
+    0x8010001a, 0x00000041, 0x00000005, 0x0700004d, 0x00100012, 0x00000005, 0x00100022, 0x00000005, 0x0010002a, 0x00000004,
+    0x09000032, 0x00100082, 0x00000004, 0x0010002a, 0x00000004, 0x0010000a, 0x00000005, 0x0010001a, 0x00000005, 0x07000038,
+    0x00100082, 0x00000009, 0x0010003a, 0x00000004, 0x0010000a, 0x00000006, 0x05000036, 0x00100042, 0x00000007, 0x0010002a,
+    0x00000004, 0x0700000e, 0x00100082, 0x00000004, 0x00004001, 0x3f800000, 0x0010003a, 0x00000004, 0x07000038, 0x00100012,
+    0x00000004, 0x0010003a, 0x00000004, 0x00004001, 0x3e800000, 0x07000038, 0x00100012, 0x00000007, 0x0010000a, 0x00000005,
+    0x0010000a, 0x00000004, 0x07000000, 0x00100012, 0x00000007, 0x0010000a, 0x00000007, 0x0010000a, 0x00000007, 0x09000032,
+    0x00100022, 0x00000006, 0x0010002a, 0x00000004, 0x00004001, 0x40000000, 0x00004001, 0xc0490fdb, 0x07000038, 0x00100022,
+    0x00000006, 0x0010001a, 0x00000006, 0x0010000a, 0x00000005, 0x09000032, 0x00100022, 0x00000006, 0x0010001a, 0x00000005,
+    0x00004001, 0x40000000, 0x0010001a, 0x00000006, 0x08000000, 0x00100022, 0x00000004, 0x0010001a, 0x00000006, 0x8010001a,
+    0x00000041, 0x00000005, 0x07000038, 0x00100022, 0x00000004, 0x0010001a, 0x00000004, 0x0010000a, 0x00000004, 0x07000000,
+    0x00100042, 0x00000004, 0x0010001a, 0x00000006, 0x0010001a, 0x00000005, 0x07000038, 0x00100042, 0x00000004, 0x0010002a,
+    0x00000004, 0x0010000a, 0x00000004,
+};
+// mov r7.yw, l(0, 0, 0, 0): mask and step counter.
+const uint32_t BM_SETUP_END[8] = {
+    0x08000036, 0x001000a2, 0x00000007, 0x00004002, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+};
+// Slice end: countbits, visible share, times the open value.
+const uint32_t BM_SLICE_END[28] = {
+    0x05000086, 0x00100082, 0x00000004, 0x0010001a, 0x00000007, 0x05000056, 0x00100082, 0x00000004, 0x0010003a, 0x00000004,
+    0x09000032, 0x00100082, 0x00000004, 0x0010003a, 0x00000004, 0x00004001, 0xbd000000, 0x00004001, 0x3f800000, 0x09000032,
+    0x00100082, 0x00000002, 0x0010003a, 0x00000009, 0x0010003a, 0x00000004, 0x0010003a, 0x00000002,
+};
+// Side 0: falloff, fast acos, gtao mapping, v2 rounding, the sector bits.
+const uint32_t BM_MARK0[233] = {
+    0x0d000032, 0x00100032, 0x00000005, 0x80100ff6, 0x00000041, 0x00000004, 0x00004002, 0x40000000, 0x40000000, 0x00000000,
+    0x00000000, 0x00100046, 0x00000005, 0x0a000034, 0x00100032, 0x00000005, 0x00100046, 0x00000005, 0x00004002, 0xbf800000,
+    0xbf800000, 0x00000000, 0x00000000, 0x0a000033, 0x00100032, 0x00000005, 0x00100046, 0x00000005, 0x00004002, 0x3f800000,
+    0x3f800000, 0x00000000, 0x00000000, 0x10000032, 0x001000c2, 0x00000008, 0x80100406, 0x00000081, 0x00000005, 0x00004002,
+    0x00000000, 0x00000000, 0xbe2c9f73, 0xbe2c9f73, 0x00004002, 0x00000000, 0x00000000, 0x3fc89afe, 0x3fc89afe, 0x0b000000,
+    0x00100032, 0x00000009, 0x80100046, 0x000000c1, 0x00000005, 0x00004002, 0x3f800000, 0x3f800000, 0x00000000, 0x00000000,
+    0x0500004b, 0x00100032, 0x00000009, 0x00100046, 0x00000009, 0x07000038, 0x001000c2, 0x00000008, 0x00100ea6, 0x00000008,
+    0x00100406, 0x00000009, 0x0a000031, 0x00100032, 0x00000009, 0x00100046, 0x00000005, 0x00004002, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x0b000000, 0x00100032, 0x00000005, 0x80100ae6, 0x00000041, 0x00000008, 0x00004002, 0x40490fdb,
+    0x40490fdb, 0x00000000, 0x00000000, 0x09000037, 0x00100032, 0x00000005, 0x00100046, 0x00000009, 0x00100046, 0x00000005,
+    0x00100ae6, 0x00000008, 0x08000000, 0x00100042, 0x00000008, 0x8010002a, 0x00000041, 0x00000007, 0x00004001, 0x3fc90fdb,
+    0x07000033, 0x00100032, 0x00000005, 0x00100046, 0x00000005, 0x00100aa6, 0x00000008, 0x0d000032, 0x001000c2, 0x00000008,
+    0x00100406, 0x00000005, 0x00004002, 0x00000000, 0x00000000, 0xc0000000, 0xc0000000, 0x80100aa6, 0x00000041, 0x00000007,
+    0x0600004d, 0x0000d000, 0x001000c2, 0x00000008, 0x00100ea6, 0x00000008, 0x09000032, 0x00100032, 0x00000005, 0x00100046,
+    0x00000005, 0x00100006, 0x00000007, 0x00100556, 0x00000004, 0x09002032, 0x00100032, 0x00000005, 0x00100ae6, 0x00000008,
+    0x00100006, 0x00000004, 0x00100046, 0x00000005, 0x0f000032, 0x00100032, 0x00000009, 0x00100046, 0x00000005, 0x00004002,
+    0x42000000, 0x42000000, 0x00000000, 0x00000000, 0x00004002, 0x3f000000, 0x3f000000, 0x00000000, 0x00000000, 0x05000041,
+    0x00100032, 0x00000009, 0x00100046, 0x00000009, 0x07000033, 0x00100042, 0x00000008, 0x0010000a, 0x00000009, 0x0010001a,
+    0x00000009, 0x07000034, 0x00100082, 0x00000008, 0x0010000a, 0x00000009, 0x0010001a, 0x00000009, 0x08000000, 0x00100082,
+    0x00000008, 0x0010003a, 0x00000008, 0x8010002a, 0x00000041, 0x00000008, 0x0700001d, 0x00100022, 0x00000009, 0x0010003a,
+    0x00000008, 0x00004001, 0x42000000, 0x0500001c, 0x001000c2, 0x00000008, 0x00100ea6, 0x00000008, 0x0b00008c, 0x00100012,
+    0x00000009, 0x0010003a, 0x00000008, 0x0010002a, 0x00000008, 0x00004001, 0xffffffff, 0x00004001, 0x00000000, 0x0700003c,
+    0x00100012, 0x00000009, 0x0010000a, 0x00000009, 0x0010001a, 0x00000009, 0x0700003c, 0x00100022, 0x00000007, 0x0010001a,
+    0x00000007, 0x0010000a, 0x00000009,
+};
+// Side 1: falloff, fast acos, gtao mapping, v2 rounding, the sector bits.
+const uint32_t BM_MARK1[233] = {
+    0x0d000032, 0x00100032, 0x00000005, 0x80100ff6, 0x00000041, 0x00000004, 0x00004002, 0x40000000, 0x40000000, 0x00000000,
+    0x00000000, 0x00100046, 0x00000005, 0x0a000034, 0x00100032, 0x00000005, 0x00100046, 0x00000005, 0x00004002, 0xbf800000,
+    0xbf800000, 0x00000000, 0x00000000, 0x0a000033, 0x00100032, 0x00000005, 0x00100046, 0x00000005, 0x00004002, 0x3f800000,
+    0x3f800000, 0x00000000, 0x00000000, 0x10000032, 0x001000c2, 0x00000008, 0x80100406, 0x00000081, 0x00000005, 0x00004002,
+    0x00000000, 0x00000000, 0xbe2c9f73, 0xbe2c9f73, 0x00004002, 0x00000000, 0x00000000, 0x3fc89afe, 0x3fc89afe, 0x0b000000,
+    0x00100032, 0x00000009, 0x80100046, 0x000000c1, 0x00000005, 0x00004002, 0x3f800000, 0x3f800000, 0x00000000, 0x00000000,
+    0x0500004b, 0x00100032, 0x00000009, 0x00100046, 0x00000009, 0x07000038, 0x001000c2, 0x00000008, 0x00100ea6, 0x00000008,
+    0x00100406, 0x00000009, 0x0a000031, 0x00100032, 0x00000009, 0x00100046, 0x00000005, 0x00004002, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x0b000000, 0x00100032, 0x00000005, 0x80100ae6, 0x00000041, 0x00000008, 0x00004002, 0x40490fdb,
+    0x40490fdb, 0x00000000, 0x00000000, 0x09000037, 0x00100032, 0x00000005, 0x00100046, 0x00000009, 0x00100046, 0x00000005,
+    0x00100ae6, 0x00000008, 0x07000000, 0x00100042, 0x00000008, 0x0010002a, 0x00000007, 0x00004001, 0x3fc90fdb, 0x07000033,
+    0x00100032, 0x00000005, 0x00100046, 0x00000005, 0x00100aa6, 0x00000008, 0x0d000032, 0x001000c2, 0x00000008, 0x00100406,
+    0x00000005, 0x00004002, 0x00000000, 0x00000000, 0x40000000, 0x40000000, 0x80100aa6, 0x00000041, 0x00000007, 0x0600004d,
+    0x0000d000, 0x001000c2, 0x00000008, 0x00100ea6, 0x00000008, 0x09000032, 0x00100032, 0x00000005, 0x00100046, 0x00000005,
+    0x00100006, 0x00000007, 0x00100aa6, 0x00000004, 0x0a002032, 0x00100032, 0x00000005, 0x80100ae6, 0x00000041, 0x00000008,
+    0x00100006, 0x00000004, 0x00100046, 0x00000005, 0x0f000032, 0x00100032, 0x00000009, 0x00100046, 0x00000005, 0x00004002,
+    0x42000000, 0x42000000, 0x00000000, 0x00000000, 0x00004002, 0x3f000000, 0x3f000000, 0x00000000, 0x00000000, 0x05000041,
+    0x00100032, 0x00000009, 0x00100046, 0x00000009, 0x07000033, 0x00100042, 0x00000008, 0x0010000a, 0x00000009, 0x0010001a,
+    0x00000009, 0x07000034, 0x00100082, 0x00000008, 0x0010000a, 0x00000009, 0x0010001a, 0x00000009, 0x08000000, 0x00100082,
+    0x00000008, 0x0010003a, 0x00000008, 0x8010002a, 0x00000041, 0x00000008, 0x0700001d, 0x00100022, 0x00000009, 0x0010003a,
+    0x00000008, 0x00004001, 0x42000000, 0x0500001c, 0x001000c2, 0x00000008, 0x00100ea6, 0x00000008, 0x0b00008c, 0x00100012,
+    0x00000009, 0x0010003a, 0x00000008, 0x0010002a, 0x00000008, 0x00004001, 0xffffffff, 0x00004001, 0x00000000, 0x0700003c,
+    0x00100012, 0x00000009, 0x0010000a, 0x00000009, 0x0010001a, 0x00000009, 0x0700003c, 0x00100022, 0x00000007, 0x0010001a,
+    0x00000007, 0x0010000a, 0x00000009,
+};
+// The back cosine for thickness t (slots: -t, -2t, -t*t).
+const uint32_t BM_BACK[39] = {
+    0x09000032, 0x00100022, 0x00000005, 0x0010000a, 0x00000005, 0x0010003a, 0x00000004, 0x00004001, 0xc0400000, 0x09000032,
+    0x00100042, 0x00000008, 0x0010001a, 0x00000005, 0x00004001, 0xc0c00000, 0x00004001, 0xc1100000, 0x09000032, 0x00100042,
+    0x00000008, 0x0010003a, 0x00000004, 0x0010003a, 0x00000004, 0x0010002a, 0x00000008, 0x05000044, 0x00100042, 0x00000008,
+    0x0010002a, 0x00000008, 0x07000038, 0x00100022, 0x00000005, 0x0010001a, 0x00000005, 0x0010002a, 0x00000008,
+};
+const int BM_BACK_SLOTS[3] = {8, 15, 17};
+// Game, side 0: mad c - 2w, max r7.y.
+const uint32_t BM_GAME_MARK[17] = {
+    0x0a000032, 0x00100082, 0x00000004, 0x8010003a, 0x00000041, 0x00000004, 0x00004001, 0x40000000, 0x0010000a, 0x00000005,
+    0x07000034, 0x00100022, 0x00000007, 0x0010003a, 0x00000004, 0x0010001a, 0x00000007,
+};
+// Game, side 1: mad c - 2w, max r7.z.
+const uint32_t BM_GAME_MARK1[17] = {
+    0x0a000032, 0x00100082, 0x00000004, 0x8010003a, 0x00000041, 0x00000004, 0x00004001, 0x40000000, 0x0010000a, 0x00000005,
+    0x07000034, 0x00100042, 0x00000007, 0x0010003a, 0x00000004, 0x0010002a, 0x00000007,
+};
+// Game: G148..217 (horizon acos, projection, integral) at 0x1150, 2116 bytes, FNV-1a 0xac91a980.
+const uint32_t BM_GAME_END_FNV = 0xac91a980;
+const size_t BM_GAME_END_BYTES = 2116;
+// Byte offsets in the game's shader: the two "mad c - 2w; max horizon" pairs and the start of G148..217 (the
+// horizon acos, the normal projection and the cosine integral).
+const size_t BM_AT_MARK[2] = {0xe0c, 0x10e8};
+const size_t BM_AT_END = 0x1150;
+// div r5.x, r5.x, r4.w: the horizon cosine of a side, at AT_DISTANCE.
+const uint32_t BM_GAME_DIV[7] = {0x0700000E, 0x00100012, 5, 0x0010000A, 5, 0x0010003A, 4};
+
+float lit(double x)
+{
+    char text[40];
+    snprintf(text, sizeof(text), "%.9g", x);
+    return float(strtod(text, nullptr));
+}
+
+uint32_t fnv1a(const uint8_t *p, size_t n)
+{
+    uint32_t h = 0x811c9dc5;
+    for (size_t i = 0; i < n; ++i)
+        h = (h ^ p[i]) * 0x01000193;
+    return h;
+}
+
+// Removes `count` tokens at byte offset `at` (the start of an instruction) from the code chunk. The stream
+// length, chunk size, container size and later chunk offsets follow, as in dxbc_insert.
+bool dxbc_erase(std::vector<uint8_t> &code, size_t at, size_t count)
+{
+    if (code.size() < 32)
+        return false;
+    const uint32_t chunks = read_u32(code, 28);
+    size_t chunk = 0;
+    for (uint32_t i = 0; i < chunks && chunk == 0; ++i)
+    {
+        const size_t o = read_u32(code, 32 + size_t(i) * 4);
+        if (o + 16 <= code.size() &&
+            (memcmp(code.data() + o, "SHEX", 4) == 0 || memcmp(code.data() + o, "SHDR", 4) == 0))
+            chunk = o;
+    }
+    if (chunk == 0)
+        return false;
+    const size_t stream = chunk + 8;
+    const uint32_t length = read_u32(code, stream + 4);
+    const size_t bytes = count * 4;
+    if (at < stream + 8 || at + bytes > stream + size_t(length) * 4 || (at - stream) % 4 != 0)
+        return false;
+    code.erase(code.begin() + at, code.begin() + at + bytes);
+    write_u32(code, stream + 4, length - uint32_t(count));
+    write_u32(code, chunk + 4, read_u32(code, chunk + 4) - uint32_t(bytes));
+    write_u32(code, 24, uint32_t(code.size()));
+    for (uint32_t i = 0; i < chunks; ++i)
+    {
+        const size_t slot = 32 + size_t(i) * 4;
+        if (read_u32(code, slot) > chunk)
+            write_u32(code, slot, read_u32(code, slot) - uint32_t(bytes));
+    }
+    return true;
+}
+
+bool replace_tokens(std::vector<uint8_t> &code, size_t at, size_t old_count, const std::vector<uint32_t> &tokens)
+{
+    return dxbc_erase(code, at, old_count) && dxbc_insert(code, at, tokens.data(), tokens.size());
+}
+
+template <size_t N> void append(std::vector<uint32_t> &out, const uint32_t (&tokens)[N])
+{
+    out.insert(out.end(), tokens, tokens + N);
+}
+
 bool make_ao_copy(std::vector<uint8_t> &code, const float *v)
 {
+    const bool bitmask = v[AO_METHOD] >= 0.5f;
     const float pi = 3.14159265358979f;
     if (read_u32(code, AT_SLICES) != 2 || read_u32(code, AT_SLICE_ANGLE) != bits(pi / 2.0f) ||
         read_u32(code, AT_STEPS) != 5 || read_u32(code, AT_STEP_SCALE) != bits(0.2f) ||
@@ -357,9 +538,7 @@ bool make_ao_copy(std::vector<uint8_t> &code, const float *v)
     write_u32(code, AT_PATTERN, bits(pi / (16.0f * float(slices))));
 
     // Everything below inserts code. Back to front: an insert moves everything after it.
-    const float thin = v[AO_THIN], compensation = v[AO_THIN_COMPENSATION];
-    if (thin > 0.0f && memcmp(code.data() + AT_DIRECTION_START, DIRECTION_START, sizeof(DIRECTION_START)) != 0)
-        return false;
+    const float compensation = v[AO_THIN_COMPENSATION];
     if (v[AO_MIN_VISIBILITY] > 0.0f)
     {
         // max r0.z, r0.z, l(floor) after the average over the directions.
@@ -370,52 +549,28 @@ bool make_ao_copy(std::vector<uint8_t> &code, const float *v)
         if (!dxbc_insert(code, AT_AVERAGE_OP + sizeof(game), floor, 7))
             return false;
     }
-    // The longest run of steps, in a row, that still counts as thin. A step spans about radius / steps.
-    const float narrow = std::max(1.0f, std::round(float(steps) * v[AO_THIN_WIDTH] / v[AO_RADIUS])) + 0.5f;
-    // How far above the horizon a step has to land to start a new object.
-    const float jump = std::max(0.25f, 2.5f * v[AO_THIN_TOLERANCE]);
+    if (bitmask)
+    {
+        // Slice end: the horizon acos, normal projection and integral become countbits x the open slice value.
+        std::vector<uint32_t> end;
+        append(end, BM_SLICE_END);
+        if (fnv1a(code.data() + BM_AT_END, BM_GAME_END_BYTES) != BM_GAME_END_FNV ||
+            !replace_tokens(code, BM_AT_END, BM_GAME_END_BYTES / 4, end))
+            return false;
+    }
     for (int k = 1; k >= 0; --k)
     {
-        if (thin > 0.0f)
+        if (bitmask)
         {
-            const horizon_site &h = HORIZONS[k];
-            const uint32_t game[7] = {0x07000034, h.horizon_dest, 7, 0x0010003A, 4, h.horizon_src, 7};
-            if (memcmp(code.data() + h.at, game, sizeof(game)) != 0)
+            // mad r4.w, -r4.w, l(2), r5.x and the horizon max become the sector marking.
+            if (memcmp(code.data() + BM_AT_MARK[k], k == 0 ? BM_GAME_MARK : BM_GAME_MARK1, sizeof(BM_GAME_MARK)) != 0)
                 return false;
-            // This side's run count and held width: r10.x and r10.y, or r10.z and r10.w.
-            const uint32_t run_dst = k == 0 ? 0x00100012 : 0x00100042, run_src = k == 0 ? 0x0010000A : 0x0010002A;
-            const uint32_t wide_dst = k == 0 ? 0x00100022 : 0x00100082, wide_src = k == 0 ? 0x0010001A : 0x0010003A;
-            const uint32_t tokens[] = {
-                // add r9.y, horizon, l(-tolerance)
-                0x07000000, 0x00100022, 9, h.horizon_src, 7, 0x00004001, bits(-v[AO_THIN_TOLERANCE]),
-                // ge r9.w, r4.w, r9.y: this step is still on the object that holds the horizon
-                0x0700001D, 0x00100082, 9, 0x0010003A, 4, 0x0010001A, 9,
-                // add r9.x, run, l(1)
-                0x07000000, 0x00100012, 9, run_src, 10, 0x00004001, bits(1.0f),
-                // and run, r9.x, r9.w: one more in a row, or 0
-                0x07000001, run_dst, 10, 0x0010000A, 9, 0x0010003A, 9,
-                // add r9.x, horizon, l(jump)
-                0x07000000, 0x00100012, 9, h.horizon_src, 7, 0x00004001, bits(jump),
-                // lt r9.x, r9.x, r4.w: far above the horizon in one step, a new object
-                0x07000031, 0x00100012, 9, 0x0010000A, 9, 0x0010003A, 4,
-                // movc run, r9.x, l(1), run
-                0x09000037, run_dst, 10, 0x0010000A, 9, 0x00004001, bits(1.0f), run_src, 10,
-                // movc wide, r9.w, run, wide: the width of whatever holds the horizon
-                0x09000037, wide_dst, 10, 0x0010003A, 9, run_src, 10, wide_src, 10,
-                // mul r9.x, horizon, l(1 - share)
-                0x07000038, 0x00100012, 9, h.horizon_src, 7, 0x00004001, bits(1.0f - thin),
-                // mad r9.x, r4.w, l(share), r9.x: the sunk horizon
-                0x09000032, 0x00100012, 9, 0x0010003A, 4, 0x00004001, bits(thin), 0x0010000A, 9,
-                // lt r9.y, wide, l(narrow)
-                0x07000031, 0x00100022, 9, wide_src, 10, 0x00004001, bits(narrow),
-                // movc r9.x, r9.y, r9.x, horizon: sink only behind a narrow object
-                0x09000037, 0x00100012, 9, 0x0010001A, 9, 0x0010000A, 9, h.horizon_src, 7,
-                // max horizon, r4.w, r9.x
-                0x07000034, h.horizon_dest, 7, 0x0010003A, 4, 0x0010000A, 9,
-            };
-            const size_t count = sizeof(tokens) / sizeof(tokens[0]);
-            memcpy(code.data() + h.at, tokens, 7 * 4);
-            if (!dxbc_insert(code, h.at + 7 * 4, tokens + 7, count - 7))
+            std::vector<uint32_t> mark;
+            if (k == 0)
+                append(mark, BM_MARK0);
+            else
+                append(mark, BM_MARK1);
+            if (!replace_tokens(code, BM_AT_MARK[k], std::size(BM_GAME_MARK), mark))
                 return false;
         }
         if (compensation > 0.0f)
@@ -435,6 +590,21 @@ bool make_ao_copy(std::vector<uint8_t> &code, const float *v)
                 0x0500004B, 0x00100082, 4, 0x0010003A, 4,
             };
             if (!dxbc_insert(code, AT_DISTANCE[k] + sizeof(game), tokens, uint32_t(std::size(tokens))))
+                return false;
+        }
+        if (bitmask)
+        {
+            // Right after the divide, ahead of thin compensation (inserted at the same place just above): the
+            // back cosine.
+            if (memcmp(code.data() + AT_DISTANCE[k], BM_GAME_DIV, sizeof(BM_GAME_DIV)) != 0)
+                return false;
+            const double t = v[AO_THICKNESS];
+            std::vector<uint32_t> after;
+            append(after, BM_BACK);
+            after[BM_BACK_SLOTS[0]] = bits(lit(-t));
+            after[BM_BACK_SLOTS[1]] = bits(lit(-2 * t));
+            after[BM_BACK_SLOTS[2]] = bits(lit(-t * t));
+            if (!dxbc_insert(code, AT_DISTANCE[k] + sizeof(BM_GAME_DIV), after.data(), after.size()))
                 return false;
         }
     }
@@ -464,12 +634,16 @@ bool make_ao_copy(std::vector<uint8_t> &code, const float *v)
         if (!dxbc_insert(code, AT_STEP_OFFSET + sizeof(game), tokens + 7, uint32_t(std::size(tokens)) - 7))
             return false;
     }
-    if (thin > 0.0f)
+    if (bitmask)
     {
-        // mov r10.xyzw, l(0, 0, 0, 0) after each direction's horizon start.
-        const uint32_t reset[8] = {0x08000036, 0x001000F2, 10, 0x00004002, 0, 0, 0, 0};
-        if (!dxbc_insert(code, AT_DIRECTION_START + sizeof(DIRECTION_START), reset, 8) ||
-            !dxbc_set_temps(code, 11))
+        // mov r7.yzw, l(0, -1000, -1000, 0) becomes the slice setup: the normal projection moves ahead of the
+        // steps (the sectors are laid out around it), the mapping terms, a clear mask and step counter.
+        if (memcmp(code.data() + AT_DIRECTION_START, DIRECTION_START, sizeof(DIRECTION_START)) != 0)
+            return false;
+        std::vector<uint32_t> setup;
+        append(setup, BM_SETUP);
+        append(setup, BM_SETUP_END);
+        if (!replace_tokens(code, AT_DIRECTION_START, std::size(DIRECTION_START), setup))
             return false;
     }
     update_checksum(code);
@@ -494,6 +668,11 @@ void apply_to(slot &s)
     bool same = s.built_valid;
     for (int i = from; i < to && same; ++i)
         same = s.built[i] == v[i];
+    // The method and thickness sit after the lighting's settings but belong to the AO shader.
+    for (int i = AO_METHOD; i < AO_PARAMS && same && !blur; ++i)
+        same = s.built[i] == v[i];
+    for (int i = AO_METHOD; i < AO_PARAMS && !blur; ++i)
+        s.built[i] = v[i];
     if (same)
         return;
     for (int i = from; i < to; ++i)
@@ -677,8 +856,6 @@ const param_def AO_DEFS[AO_PARAMS] = {
     {"Radius", "Radius", "How far from each spot shade is looked for. The game uses 2 m.\n"
      "Larger shades deep corners but can add dark halos.",
      2, 0.5f, 16, "%.2f m", false, true, false},
-    {"ThinObjects", "Thin objects", "Lets shade fade behind thin things like grass and poles. The game uses 0.",
-     0, 0, 0.01f, "%.4f", false, false, false},
     {"FalloffStart", "Falloff start", "The share of the radius where occluders begin to count less.\n"
      "The game uses 0.50. Higher keeps more shade from nearby objects.",
      0.5f, 0.25f, 2, "%.2f", false, false, false},
@@ -694,12 +871,6 @@ const param_def AO_DEFS[AO_PARAMS] = {
     {"MaxDistance", "Max distance", "No shade beyond this many meters. It fades out over the last eighth.\n"
      "The game uses 256. Far trees and hills keep some shade up to 1024.",
      256, 32, 1024, "%.0f m", false, true, false},
-    {"ThinWidth", "Thin objects width", "Objects narrower than this count as thin for Thin objects.\n"
-     "Wider ones keep their full shade.",
-     0.25f, 0.05f, 2, "%.2f m", false, true, true},
-    {"ThinTolerance", "Thin objects tolerance", "How far a step may dip below the horizon and still count as the same object.\n"
-     "Higher keeps bumpy surfaces whole.",
-     0.1f, 0, 0.5f, "%.3f", false, false, true},
     {"SampleSpread", "Sample spread", "How the steps spread out from each pixel. The game uses 1 for even spacing.\n"
      "Higher places more of them close by where contact shade forms.",
      1, 1, 3, "%.1f", false, false, false},
@@ -709,8 +880,7 @@ const param_def AO_DEFS[AO_PARAMS] = {
     {"MinVisibility", "Min visibility", "Limits how dark shade can get. The game uses 0.\n"
      "It prevents pitch black spots in tight gaps.",
      0, 0, 0.2f, "%.2f", false, false, false},
-    {"ThinCompensation", "Thin compensation", "Occluders far behind a surface count less. The game uses 0.\n"
-     "It reduces the haze grass and leaves put on open ground and snow.",
+    {"FarOccluderFade", "Far occluder fade", "Occluders far behind a surface count less. The game uses 0.",
      0, 0, 8, "%.1f", false, false, false},
     {"BlurWidth", "Blur width", "Spacing of the blur's neighbors in pixels. The game uses 1.\n"
      "0 turns the blur off and shows a checker pattern up close.\n"
@@ -741,15 +911,22 @@ const param_def AO_DEFS[AO_PARAMS] = {
      1, 0, 2, "%.2f", false, false, true},
     {"SkyLightNight", "Sky light (night)", "Strength of the sky's light in shade at night. 1 is the game's.",
      1, 0.5f, 2, "%.2f", false, false, false},
+    {"Method", "Method", "Horizon-based is the game's own AO. Visibility bitmask lets light pass behind thin things\n"
+     "like grass and poles. They cast fewer halos.",
+     0, 0, 1, "%.0f", true, false, false},
+    {"BitmaskThickness", "Bitmask thickness", "How thick objects are taken to be (Visibility bitmask). Thinner lets light\n"
+     "reach behind grass and thin plants. That gives fewer halos and slightly lighter shade. Thicker darkens\n"
+     "more around everything.",
+     0.1f, 0.02f, 1, "%.3f m", false, true, false},
 };
 
 // Lighting: bounce, sunlight occlusion, its curve, baked shade blend, sky light by day, contact shadow strength,
-// sky light at night.
+// sky light at night, then the method and the bitmask thickness.
 const float AO_PRESET_VALUES[PRESETS][AO_PARAMS] = {
-    {2, 5, 100, 2, 0, 0.5f, 1, 5, 128, 256, 0.25f, 0.1f, 1, 0, 0, 0, 1, 40, 4, 1, 0, 3, 0, 1, 1, 1},
-    {3, 10, 100, 2, 0.002f, 0.67f, 1, 5, 213, 512, 0.25f, 0.1f, 1.4f, 1.3f, 0.03f, 2, 1, 40, 4, 1.25f, 0.17f, 3, 0.5f, 1.07f, 1, 0.9f},
-    {4, 20, 100, 2, 0.004f, 0.83f, 1, 5, 299, 768, 0.25f, 0.1f, 1.4f, 1.3f, 0.03f, 2, 1, 40, 4, 1.5f, 0.33f, 3, 1, 1.13f, 1, 0.8f},
-    {5, 30, 100, 2, 0.006f, 1.0f, 1, 5, 384, 1024, 0.25f, 0.1f, 1.4f, 1.3f, 0.03f, 2, 1, 40, 4, 1.75f, 0.5f, 3, 1, 1.2f, 1, 0.7f},
+    {2, 5, 100, 2, 0.5f, 1, 5, 128, 256, 1, 0, 0, 0, 1, 40, 4, 1, 0, 3, 0, 1, 1, 1, 0, 0.1f},
+    {3, 10, 100, 2, 0.67f, 1, 5, 213, 512, 1.4f, 1.3f, 0.03f, 1.5f, 1, 40, 4, 1.23f, 0.25f, 3, 0.5f, 1.07f, 1, 0.9f, 1, 0.4f},
+    {4, 20, 100, 2, 0.83f, 1, 5, 299, 768, 1.4f, 1.3f, 0.03f, 1.5f, 1, 40, 4, 1.47f, 0.33f, 3, 1, 1.13f, 1, 0.8f, 1, 0.35f},
+    {5, 30, 100, 2, 1.0f, 1, 5, 384, 1024, 1.4f, 1.3f, 0.03f, 1.5f, 1, 40, 4, 1.7f, 0.4f, 3, 1, 1.2f, 1, 0.7f, 1, 0.3f},
 };
 
 void ao_register()
@@ -797,5 +974,20 @@ void ao_set(const float values[AO_PARAMS])
 bool ao_ready()
 {
     return g_ready.load();
+}
+
+const char *ao_value_name(const param_def &def, float value)
+{
+    static const char *const METHODS[2] = {"Horizon-based", "Visibility bitmask"};
+    const int i = int(value + 0.5f);
+    return &def == &AO_DEFS[AO_METHOD] && i >= 0 && i < 2 ? METHODS[i] : nullptr;
+}
+
+const char *ao_inactive_note(int param, const float values[AO_PARAMS])
+{
+    const bool bitmask = values[AO_METHOD] >= 0.5f;
+    if (param == AO_THICKNESS && !bitmask)
+        return "Used with Visibility bitmask.";
+    return nullptr;
 }
 
