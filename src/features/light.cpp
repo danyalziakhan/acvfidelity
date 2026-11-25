@@ -63,6 +63,13 @@ struct variant
     std::atomic<uint32_t> built{0};  // the generation of values the active pipeline is for
     std::atomic<bool> queued{false};
     std::atomic<bool> failed{false}; // the game's own for good
+    // A second copy that also reads our reflection and indirect light textures. Only the scene hook binds it, right
+    // before a draw whose space-2 table it has replaced with its own.
+    std::atomic<uint64_t> ssr_active{0};
+    std::atomic<bool> ssr_failed{false};
+    bool ssr_only = false; // the AO edits can't go in: only the copy with our reflection
+    const char *ssr2_missing = nullptr; // why our patch can't go in (a literal), or nullptr
+    const char *ssil_missing = nullptr; // why the indirect light patch can't go in, or nullptr
     // Under g_lock.
     bool dead = false;
     std::vector<uint64_t> made; // every copy not destroyed yet
@@ -87,6 +94,9 @@ struct retired_copy
 };
 std::vector<retired_copy> g_retired;
 std::atomic<uint64_t> g_frame{0};
+uint32_t g_ssr2 = 0; // under g_lock: the space-2 register of the SSR texture, 0 off
+bool g_ssr2_gloss = false; // under g_lock: the SSR copies also export their final gloss
+uint32_t g_ssil = 0; // under g_lock: the space-2 register of the indirect light texture, 0 off
 
 // The worker. It holds a reference on the add-on while it runs and ends after two idle seconds.
 std::mutex g_queue_lock;
@@ -166,6 +176,7 @@ void bury(const std::shared_ptr<variant> &v)
 {
     v->dead = true;
     v->active = 0;
+    v->ssr_active = 0;
     for (uint64_t handle : v->made)
         v->dev->destroy_pipeline({handle});
     v->made.clear();
@@ -174,11 +185,64 @@ void bury(const std::shared_ptr<variant> &v)
                     g_retired.end());
 }
 
+// The copy that reads our reflection and indirect light textures too (whichever is on). Under the shared
+// work lock. A variant that takes neither keeps only its normal copy and the hook never swaps its table.
+void build_ssr(const std::shared_ptr<variant> &v, light_values values, uint32_t reg, uint32_t ssil, uint32_t gen)
+{
+    if (v->ssr_failed)
+        return;
+    values.ssr2 = reg;
+    values.ssil = ssil;
+    {
+        std::lock_guard lock(g_lock);
+        values.ssr2_gloss = g_ssr2_gloss;
+    }
+    const shader_desc *ps = pixel_of(*v);
+    std::vector<uint8_t> code;
+    if (!light_patch(static_cast<const uint8_t *>(ps->code), ps->code_size, values, code))
+    {
+        v->ssr_failed = true;
+        const light_support s = light_check(static_cast<const uint8_t *>(ps->code), ps->code_size);
+        std::lock_guard lock(g_lock);
+        const char *why = reg != 0 ? s.ssr2_missing : s.ssil_missing;
+        const std::string what =
+            std::string(reg != 0 ? "surface reflections (" : "indirect lighting (") + (why != nullptr ? why : "patch failed") + ")";
+        report(v->hash, ps->code_size, what.c_str(), "", false);
+        return;
+    }
+    std::vector<pipeline_subobject> subs = v->desc.subs;
+    shader_desc patched = *ps;
+    patched.code = code.data();
+    patched.code_size = code.size();
+    subs[v->desc.pixel_shader].data = &patched;
+    pipeline copy = {0};
+    t_creating = true;
+    const bool made = v->dev->create_pipeline(v->layout, uint32_t(subs.size()), subs.data(), &copy);
+    t_creating = false;
+    std::lock_guard lock(g_lock);
+    if (!made)
+    {
+        v->ssr_failed = true;
+        report(v->hash, ps->code_size, "surface reflections (D3D12 rejected the copy)", "", false);
+        return;
+    }
+    ++g_copies;
+    if (v->dead || gen != g_gen.load())
+    {
+        v->dev->destroy_pipeline(copy);
+        return;
+    }
+    v->made.push_back(copy.handle);
+    if (const uint64_t old = v->ssr_active.exchange(copy.handle); old != 0)
+        retire(v, old);
+}
+
 void build(const std::shared_ptr<variant> &v)
 {
     std::shared_lock work(g_work_lock);
     light_values values;
     uint32_t gen;
+    uint32_t ssr2 = 0, ssil = 0;
     {
         std::lock_guard lock(g_lock);
         v->queued = false;
@@ -186,6 +250,15 @@ void build(const std::shared_ptr<variant> &v)
             return;
         values = g_values;
         gen = g_gen.load();
+        ssr2 = g_ssr2;
+        ssil = g_ssil;
+    }
+    if (v->ssr_only)
+        values = light_values{}; // the game's AO values: no AO copy, only ours
+    if (ssr2 != 0 || ssil != 0)
+        build_ssr(v, values, ssr2, ssil, gen);
+    {
+        std::lock_guard again(g_lock);
         if (!light_changes(values))
         {
             v->built = gen;
@@ -317,12 +390,15 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
 
     const light_support s = light_check(static_cast<const uint8_t *>(ps->code), ps->code_size);
     auto v = std::make_shared<variant>();
-    const bool copied = s.failed == nullptr && v->desc.copy(count, subobjects) && v->desc.pixel_shader != SIZE_MAX;
+    // A variant the AO edits can't take still gets the copy with our reflection or indirect light.
+    const bool ssr_only = s.failed != nullptr && (s.ssr2_missing == nullptr || s.ssil_missing == nullptr);
+    const bool copied = (s.failed == nullptr || ssr_only) && v->desc.copy(count, subobjects) &&
+                        v->desc.pixel_shader != SIZE_MAX;
     {
         std::lock_guard lock(g_lock);
         if (g_patched == 0 && g_failures.empty())
             g_first_seen = std::chrono::steady_clock::now();
-        if (s.failed != nullptr || !copied)
+        if ((s.failed != nullptr && !ssr_only) || !copied)
         {
             report(hash, ps->code_size, "", s.failed != nullptr ? s.failed : "pipeline description not copied", true);
             return;
@@ -342,7 +418,16 @@ void on_init_pipeline(device *dev, pipeline_layout layout, uint32_t count, const
             ++g_partial["no sun light (nothing to patch)"];
         if (!s.bounce)
             lacks("bounce light", "bounce site not found");
-        if (!missing.empty())
+        v->ssr2_missing = s.ssr2_missing;
+        v->ssil_missing = s.ssil_missing;
+        if (ssr_only)
+        {
+            report(hash, ps->code_size,
+                   (std::string("the AO lighting edits (") + s.failed + "), reflections and indirect light only").c_str(), "",
+                   false);
+            v->ssr_only = true;
+        }
+        else if (!missing.empty())
             report(hash, ps->code_size, missing.c_str(), "", false);
         if (g_patched++ == 0)
             dd_log(reshade::log::level::info, "Lighting: found the game's scene lighting shaders");
@@ -510,6 +595,7 @@ void light_set(const float values[AO_PARAMS])
     g_values_set = true;
     g_values = v;
     g_need = light_changes(v);
+    g_need = g_need || g_ssr2 != 0 || g_ssil != 0;
     ++g_gen;
     if (g_need)
         return;
@@ -520,3 +606,73 @@ void light_set(const float values[AO_PARAMS])
             retire(entry.second, old);
 }
 
+void light_set_ssr2(uint32_t reg, bool gloss)
+{
+    std::lock_guard lock(g_lock);
+    if (g_ssr2 == reg && g_ssr2_gloss == gloss)
+        return;
+    g_ssr2 = reg;
+    g_ssr2_gloss = gloss;
+    ++g_gen;
+    g_need = light_changes(g_values) || reg != 0 || g_ssil != 0;
+    std::shared_lock map(g_map_lock);
+    for (const auto &entry : g_map)
+    {
+        // Another set of edits: a copy that could not be made before may work now.
+        entry.second->ssr_failed = false;
+        if (reg == 0 && g_ssil == 0)
+            if (const uint64_t old = entry.second->ssr_active.exchange(0); old != 0)
+                retire(entry.second, old);
+        if (!g_need)
+            if (const uint64_t old = entry.second->active.exchange(0); old != 0)
+                retire(entry.second, old);
+    }
+}
+
+void light_set_ssr2_gloss(bool gloss)
+{
+    std::lock_guard lock(g_lock);
+    if (g_ssr2_gloss == gloss)
+        return;
+    g_ssr2_gloss = gloss;
+    if (g_ssr2 != 0)
+        ++g_gen; // only the copies with our reflection export it
+}
+
+void light_set_ssil(uint32_t reg)
+{
+    std::lock_guard lock(g_lock);
+    if (g_ssil == reg)
+        return;
+    g_ssil = reg;
+    ++g_gen;
+    g_need = light_changes(g_values) || g_ssr2 != 0 || reg != 0;
+    std::shared_lock map(g_map_lock);
+    for (const auto &entry : g_map)
+    {
+        entry.second->ssr_failed = false;
+        if (reg == 0 && g_ssr2 == 0)
+            if (const uint64_t old = entry.second->ssr_active.exchange(0); old != 0)
+                retire(entry.second, old);
+        if (!g_need)
+            if (const uint64_t old = entry.second->active.exchange(0); old != 0)
+                retire(entry.second, old);
+    }
+}
+
+bool light_ssr_pipelines(uint64_t pipe, uint64_t *ssr, uint64_t *fallback, uint64_t *hash, const char **missing)
+{
+    if (g_variants.load(std::memory_order_relaxed) == 0)
+        return false;
+    std::shared_lock lock(g_map_lock);
+    const auto it = g_map.find(pipe);
+    if (it == g_map.end())
+        return false;
+    const variant &v = *it->second;
+    *ssr = v.ssr_active.load(std::memory_order_acquire);
+    const uint64_t active = v.active.load(std::memory_order_acquire);
+    *fallback = active != 0 ? active : pipe;
+    *hash = v.hash;
+    *missing = v.ssr2_missing != nullptr ? v.ssr2_missing : v.ssr_failed ? "D3D12 rejected the copy" : nullptr;
+    return true;
+}

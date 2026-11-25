@@ -10,3 +10,7 @@
 // The multiplier for every ShortRangeGrid. Called once a frame with the LOD object the LOD hook records.
 // Returns false if the grids couldn't be found or didn't look as expected. Nothing is written then.
 bool grass_apply(uintptr_t lod_object, float multiplier);
+
+// Streaming distance: the multiplier for the main and long-range grids (detailed models at mid distance, far tree
+// lines), 1 to 2. It applies with grass_apply while grass is above 1.0, and the game's own 1.0 otherwise.
+void grass_set_streaming(float multiplier);

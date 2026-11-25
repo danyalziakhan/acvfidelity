@@ -260,7 +260,13 @@ bool all_game_values(const float *v, int from, int to)
 
 bool make_blur_copy(std::vector<uint8_t> &code, const blur_desc &blur, const float *v)
 {
-    const int width = int(v[AO_BLUR_WIDTH]);
+    // Below 1 the neighbors stay 1 pixel away and their weights shrink: 0 is no blur, 1 the game's. Each pass has the
+    // pixel (weight 1) and 4 neighbors (up to 1 each), so the pixel's share is 1 / (1 + 4 k). k = 0.2 w / (1 - 0.8 w)
+    // makes that share fall linearly from 1 to the game's 0.2 as w goes from 0 to 1. From 1 the value is the spacing
+    // in whole pixels.
+    const float w = std::clamp(v[AO_BLUR_WIDTH], 0.0f, 4.0f);
+    const int width = w <= 0.0f ? 0 : w < 1.0f ? 1 : int(std::lround(w));
+    const float weight = w > 0.0f && w < 1.0f ? 0.2f * w / (1.0f - 0.8f * w) : 1.0f;
     for (int i = 0; i < 2; ++i)
         if (int32_t(read_u32(code, BLUR_OFFSETS[i] + blur.first_token * 4)) != BLUR_OFFSETS_GAME[i][0] ||
             int32_t(read_u32(code, BLUR_OFFSETS[i] + (blur.first_token + 2) * 4)) != BLUR_OFFSETS_GAME[i][1])
@@ -275,7 +281,7 @@ bool make_blur_copy(std::vector<uint8_t> &code, const blur_desc &blur, const flo
     }
     for (size_t at : BLUR_DEPTH)
         write_u32(code, at + 6 * 4, bits(v[AO_BLUR_DEPTH]));
-    if (v[AO_BLUR_NORMAL] != AO_DEFS[AO_BLUR_NORMAL].game)
+    if (v[AO_BLUR_NORMAL] != AO_DEFS[AO_BLUR_NORMAL].game || weight != 1.0f)
     {
         const pow_site(&sites)[4] = BLUR_NORMAL[&blur == &BLURS[0] ? 0 : 1];
         for (const pow_site &site : sites)
@@ -287,6 +293,11 @@ bool make_blur_copy(std::vector<uint8_t> &code, const blur_desc &blur, const flo
             uint32_t tokens[14];
             memcpy(tokens, sites[i].replaced, sizeof(tokens));
             tokens[sites[i].literal] = bits(v[AO_BLUR_NORMAL]);
+            // The mul by the power becomes mad r, r, l(power), l(log2 weight): the exp after it then gives
+            // weight x n^power. Same length: the mad's 9 tokens replace the mul's 7 and the two nops.
+            tokens[sites[i].literal - 6] = 0x09000032u;
+            tokens[sites[i].literal + 1] = 0x00004001u;
+            tokens[sites[i].literal + 2] = bits(std::log2(std::max(weight, 1e-4f)));
             memcpy(code.data() + sites[i].at, tokens, sizeof(tokens));
             if (!dxbc_insert(code, sites[i].at + sizeof(tokens), sites[i].exp, 5))
                 return false;
@@ -297,7 +308,7 @@ bool make_blur_copy(std::vector<uint8_t> &code, const blur_desc &blur, const flo
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// Visibility bitmask AO. The per-side horizon max becomes one 32-sector mask per slice (Therrien et al. 2023,
+// Visibility bitmask AO. The per-side horizon max becomes one 32-sector mask per slice (the paper
 // "Screen Space Indirect Lighting with Visibility Bitmask").
 // Each sample marks the sectors between its front angle and its back angle: the sample pushed back by the
 // thickness along the view direction. Sectors follow the game's own cosine integral (gtao weighting), so a solid
@@ -882,18 +893,17 @@ const param_def AO_DEFS[AO_PARAMS] = {
      0, 0, 0.2f, "%.2f", false, false, false},
     {"FarOccluderFade", "Far occluder fade", "Occluders far behind a surface count less. The game uses 0.",
      0, 0, 8, "%.1f", false, false, false},
-    {"BlurWidth", "Blur width", "Spacing of the blur's neighbors in pixels. The game uses 1.\n"
-     "0 turns the blur off and shows a checker pattern up close.\n"
-     "Wider is smoother but softer.",
-     1, 0, 4, "%.0f", true, false, true},
+    {"BlurWidth", "Blur width", "How much the AO is smoothed. The game uses 1.\n"
+     "Below 1 the blur is lighter and keeps finer shading. 0 turns it off.\n"
+     "Above 1 it reaches farther. Smoother but softer.",
+     1, 0, 4, "%.2f", false, false, false},
     {"BlurDepth", "Blur edge", "How sharply depth differences stop the blur at edges. The game uses 40.\n"
      "Lower blurs across edges and adds halos. Higher keeps edges crisp.",
      40, 1, 400, "%.0f", false, true, true},
     {"BlurNormal", "Blur normal edge", "How sharply changes in surface direction stop the blur. The game uses 4.\n"
      "Higher keeps creases and corners crisp. Lower blurs across them.",
-     4, 0.5f, 32, "%.1f", false, true, true},
-    {"BounceLight", "Bounce light", "Strength of the light that bounces off nearby surfaces into shade.\n"
-     "1 is the game's.",
+     4, 0.5f, 32, "%.1f", false, true, false},
+    {"BounceLight", "Bounce light", "Raises the game's ambient light in shade. 1 is the game's.",
      1, 0.5f, 3, "%.2f", false, false, false},
     {"SunlightOcclusion", "Sunlight occlusion", "Lets AO dim sunlight where it is strong: plant bases, gaps between\n"
      "stones. 0 is the game's.",
@@ -914,9 +924,8 @@ const param_def AO_DEFS[AO_PARAMS] = {
     {"Method", "Method", "Horizon-based is the game's own AO. Visibility bitmask lets light pass behind thin things\n"
      "like grass and poles. They cast fewer halos.",
      0, 0, 1, "%.0f", true, false, false},
-    {"BitmaskThickness", "Bitmask thickness", "How thick objects are taken to be (Visibility bitmask). Thinner lets light\n"
-     "reach behind grass and thin plants. That gives fewer halos and slightly lighter shade. Thicker darkens\n"
-     "more around everything.",
+    {"BitmaskThickness", "Bitmask thickness", "How thick objects count as with Visibility bitmask.\n"
+     "Thinner lets light pass behind grass: fewer halos, lighter shade.",
      0.1f, 0.02f, 1, "%.3f m", false, true, false},
 };
 
@@ -924,9 +933,9 @@ const param_def AO_DEFS[AO_PARAMS] = {
 // sky light at night, then the method and the bitmask thickness.
 const float AO_PRESET_VALUES[PRESETS][AO_PARAMS] = {
     {2, 5, 100, 2, 0.5f, 1, 5, 128, 256, 1, 0, 0, 0, 1, 40, 4, 1, 0, 3, 0, 1, 1, 1, 0, 0.1f},
-    {3, 10, 100, 2, 0.67f, 1, 5, 213, 512, 1.4f, 1.3f, 0.03f, 1.5f, 1, 40, 4, 1.23f, 0.25f, 3, 0.5f, 1.07f, 1, 0.9f, 1, 0.4f},
-    {4, 20, 100, 2, 0.83f, 1, 5, 299, 768, 1.4f, 1.3f, 0.03f, 1.5f, 1, 40, 4, 1.47f, 0.33f, 3, 1, 1.13f, 1, 0.8f, 1, 0.35f},
-    {5, 30, 100, 2, 1.0f, 1, 5, 384, 1024, 1.4f, 1.3f, 0.03f, 1.5f, 1, 40, 4, 1.7f, 0.4f, 3, 1, 1.2f, 1, 0.7f, 1, 0.3f},
+    {3, 10, 100, 2, 0.67f, 1, 5, 213, 512, 1.4f, 1.3f, 0.03f, 1.5f, 0.5f, 40, 8, 1.15f, 0.27f, 3, 0.75f, 1.07f, 1, 0.9f, 1, 0.45f},
+    {4, 20, 100, 2, 0.83f, 1, 5, 299, 768, 1.4f, 1.3f, 0.03f, 1.5f, 0.5f, 40, 8, 1.30f, 0.32f, 3, 0.75f, 1.13f, 1, 0.8f, 1, 0.4f},
+    {5, 30, 100, 2, 1.0f, 1, 5, 384, 1024, 1.4f, 1.3f, 0.03f, 1.5f, 0.5f, 40, 8, 1.45f, 0.38f, 3, 0.75f, 1.2f, 1, 0.7f, 1, 0.35f},
 };
 
 void ao_register()

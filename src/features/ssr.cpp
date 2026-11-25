@@ -876,14 +876,13 @@ const param_def SSR_DEFS[SSR_PARAMS] = {
     {"NoiseTexels", "Noise spread", "How finely the ray start noise spreads over the pixels. 64 is the game's.\n"
      "128 makes the grain finer.",
      64, 64, 128, "%.0f", true, false, false},
-    {"Softening", "Softening", "Blends each reflection pixel with its neighbors. Hides the blocky look of\n"
-     "reflections below full resolution at some sharpness. Not used at full resolution. 0 is the game's.",
+    {"Softening", "Softening", "Blends each reflection pixel with its neighbors to hide the blocky look.\n"
+     "Not used at full resolution. 0 is the game's.",
      0, 0, 1, "%.2f", false, false, false},
-    {"Refinement", "Hit refinement", "Extra depth checks to find the exact point a ray hits. 0 is the game's.\n"
-     "Each one halves the error. Past 4 it is below a pixel.",
+    {"Refinement", "Hit refinement", "Extra depth checks to find the exact point a ray hits. 0 is the game's.",
      0, 0, 4, "%.0f", true, false, false},
-    {"SmoothUpscale", "Smooth upscale", "Reads the reflection with a smooth filter instead of the game's plain one.\n"
-     "Removes its steps below full resolution. Not used at full resolution. 0 is the game's.",
+    {"SmoothUpscale", "Smooth upscale", "Reads the reflection with a smooth filter. Removes its steps.\n"
+     "Not used at full resolution. 0 is the game's.",
      0, 0, 1, "%.2f", false, false, false},
     {"UpscaleFilter", "Upscale filter", "The smooth upscale's filter. 1 is soft (4 reads).\n"
      "2 is sharp (13 reads) with a little more detail. Bright reflections at night can show steps.",
@@ -891,8 +890,8 @@ const param_def SSR_DEFS[SSR_PARAMS] = {
     {"ReflectionAngle", "Reflection angle", "How steeply the camera can look down before reflections fade out.\n"
      "The game fades them from 25 to 35 degrees.",
      35, 35, 80, "%.0f deg", false, false, false},
-    {"Resolution", "Resolution", "Half is the game's. Three quarters traces reflections at 3/4 of the render size.\n"
-     "Full uses the game's own full-resolution path with its roughness blur. Each step costs more.",
+    {"Resolution", "Resolution", "Half is the game's. Three quarters and Full give sharper reflections\n"
+     "and cost more.",
      0, 0, 2, "%.0f", true, false, false},
     {"RoughnessBlur", "Roughness blur", "At full resolution the game blurs reflections by the water's roughness\n"
      "and their distance. Lower is sharper. 0 is none. The game uses 1.00.",
@@ -911,11 +910,11 @@ const param_def SSR_DEFS[SSR_PARAMS] = {
 const float SSR_PRESET_VALUES[PRESETS][SSR_PARAMS] = {
     {0.70f, 2, 1.6f, 128, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.0175f, 1.5f, 0.1f, 0.0125f, 0.70f, 0.95f, 20,
      3.3333f, 0, 1, 64, 0, 0, 0, 1, 35, 0, 1, 0},
-    {0.74f, 1.6f, 1.6f, 512, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.013f, 1.25f, 0.1f, 0.0125f, 0.78f, 0.95f, 20,
+    {0.75f, 1.6f, 1.6f, 512, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.013f, 1.25f, 0.1f, 0.0125f, 0.78f, 0.95f, 20,
      3.3333f, 0, 1, 128, 0.17f, 2, 0.33f, 1, 43, 1, 1, 1},
-    {0.78f, 1.3f, 1.6f, 1024, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.009f, 1.0f, 0.1f, 0.0125f, 0.87f, 0.95f, 20,
+    {0.80f, 1.3f, 1.6f, 1024, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.009f, 1.0f, 0.1f, 0.0125f, 0.87f, 0.95f, 20,
      3.3333f, 0, 1, 128, 0.33f, 3, 0.67f, 1, 52, 1, 1, 1},
-    {0.82f, 1, 1.6f, 4096, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.005f, 0.5f, 0.1f, 0.0125f, 0.95f, 0.95f, 20,
+    {0.85f, 1, 1.6f, 4096, 0.05f, 0.01f, 0.86602f, 1.0f / 0.7f, 0.005f, 0.5f, 0.1f, 0.0125f, 0.95f, 0.95f, 20,
      3.3333f, 0, 1, 128, 0.5f, 4, 1.0f, 1, 60, 2, 1, 1},
 };
 

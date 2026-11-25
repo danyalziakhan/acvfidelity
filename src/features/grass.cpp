@@ -12,6 +12,7 @@
 
 #include "grass.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 
@@ -28,6 +29,8 @@ const uint32_t RANGE = 0x198;
 const uint32_t SHORT_RANGE_GRID = 1;
 // The chain held 8 grids in testing. More means it isn't what we think.
 const int MAX_GRIDS = 16;
+// Streaming distance of the MainGrid (kind 0) and the LongRangeGrid (kind 2).
+float g_streaming = 1.0f;
 
 template <typename T> bool read(uintptr_t address, T &value)
 {
@@ -65,7 +68,25 @@ bool grass_apply(uintptr_t lod_object, float multiplier)
         return false;
     // Collect first, write after: a chain that doesn't look right changes nothing.
     uintptr_t targets[MAX_GRIDS];
+    float values[MAX_GRIDS];
     int count = 0;
+    // The main and long-range grids follow while grass is raised. They go back to the game's range when grass does
+    // (loads, the guard).
+    // It follows gradually, 0.5x a second, so a switch never changes the loaded range in one step. Back at 1.0 grass
+    // (a load) it is the game's range at once.
+    static float stream_now = 1.0f;
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::fmin(std::chrono::duration<float>(now - last).count(), 0.1f);
+    last = now;
+    const float stream_target = multiplier > 1.0f ? g_streaming : 1.0f;
+    if (multiplier <= 1.0f)
+        stream_now = 1.0f;
+    else if (stream_now < stream_target)
+        stream_now = std::fmin(stream_now + 0.5f * dt, stream_target);
+    else
+        stream_now = std::fmax(stream_now - 0.5f * dt, stream_target);
+    const float stream = stream_now;
     for (int n = 0; grid != 0; ++n)
     {
         if (n == MAX_GRIDS)
@@ -76,12 +97,22 @@ bool grass_apply(uintptr_t lod_object, float multiplier)
         if (!read(grid + DESCRIPTOR, descriptor) || !read(descriptor + KIND, kind) || kind > 3 ||
             !read(grid + RANGE, range) || !std::isfinite(range) || range <= 0.0f || range > 8.0f)
             return false;
-        if (kind == SHORT_RANGE_GRID && range != multiplier)
-            targets[count++] = grid + RANGE;
+        const float want = kind == SHORT_RANGE_GRID ? multiplier : kind == 0 || kind == 2 ? stream : range;
+        if (want != range)
+        {
+            targets[count] = grid + RANGE;
+            values[count++] = want;
+        }
         if (!read(grid + NEXT_GRID, grid))
             return false;
     }
     for (int i = 0; i < count; ++i)
-        write_float(targets[i], multiplier);
+        write_float(targets[i], values[i]);
     return true;
+}
+
+void grass_set_streaming(float multiplier)
+{
+    if (std::isfinite(multiplier))
+        g_streaming = std::fmin(std::fmax(multiplier, 1.0f), 2.0f);
 }
